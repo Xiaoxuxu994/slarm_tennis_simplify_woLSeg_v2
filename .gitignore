@@ -1,0 +1,57 @@
+.vscode/
+data/
+data
+work_dirs/
+local_scripts/
+sync_files.sh
+test/
+raw_data/
+*.mp4
+*draft*
+*.zip
+*.tar
+*.gz
+
+.superpowers/
+.pytest_cache/
+.codegraph
+
+output*
+
+# media
+*.mp4
+*.png
+*.jpg
+*.html
+
+
+ckpts/
+# soft link of ckpts/
+ckpts
+# wandb
+wandb/
+
+# work in progress
+*wip*
+
+*results*
+*debug*
+tmp*
+
+# caches
+*.pyc
+*.swp
+
+fusion_result.json
+
+__pycache__
+
+
+extra-info
+kernel_meta
+
+# comming soon
+*viewer*
+
+# Isolated implementation worktrees
+.worktrees/

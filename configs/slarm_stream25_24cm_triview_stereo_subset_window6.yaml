@@ -1,0 +1,82 @@
+# Frozen stereo SLARM inference over the first two views of the new dataset.
+model: slarm
+dataset: [ball_catch_24cm_triview]
+data_root: ./data/SLARM_data
+
+input_size: [320, 240]
+patch_size: 8
+embed_dim: 768
+depth: 12
+patch_embed: conv
+num_max_cameras: 2
+num_context_timesteps: 6
+num_target_timesteps: 7
+context_stride: 3
+timespan: 0.8
+mode: window_6
+
+use_affine_token: true
+use_sky_token: true
+use_ms3_motion: true
+use_last_token: true
+shortcut_rgb: true
+add_patch_plucker_embed: true
+sigmoid_rgb: true
+num_motion_tokens: 0
+
+strict_data_loading: true
+enable_task_semantic_head: true
+terminal_context_extrapolation: true
+stream25_render_target_chunk_size: 1
+stream25_reconstruction_loss: true
+
+stream25_rgb_weight: 1.00
+stream25_lpips_weight: 0.05
+stream25_ball_rgb_weight: 0.50
+stream25_depth_relative_weight: 1.00
+stream25_ball_depth_metric_weight: 0.02
+stream25_semantic_weight: 1.00
+stream25_lseg_feature_weight: 1.00
+stream25_ms3_ball_weight: 1.00
+stream25_ms3_static_weight: 0.25
+stream25_opacity_weight: 0.10
+
+stream25_ms3_velocity_scale: 5.0
+stream25_ms3_acceleration_scale: 9.81
+stream25_ms3_jerk_scale: 1.0
+terminal_dynamic_velocity_threshold: 1.0
+stream25_semantic_class_weight_cap: 10.0
+
+online_feat: true
+img_norm_for_online_feat: true
+enable_feat_loss: true
+feat_loss_coeff: 1.0
+feat_loss_type: mse
+enable_depth_loss: true
+enable_sky_opacity_loss: true
+enable_perceptual_loss: true
+perceptual_weight: 0.05
+perceptual_loss_start_iter: 0
+load_depth: true
+lseg_model_scratch_path: ckpts/lseg/lseg_model_scratch.pth
+lseg_model_pretrained_path: ckpts/lseg/lseg_model_pretrained_replace_1x1conv_with_linear.pth
+
+lr: 1.0e-5
+stream25_trunk_lr: 2.0e-6
+lr_sched: cosine
+min_lr: 1.0e-6
+warmup_iters: 500
+batch_size: 1
+seed: 20260730
+
+load_from: ckpts/ckpt_019999.pth
+train_annotation: scene_list/ball_catch_24cm_triview_train.txt
+eval_annotation: scene_list/ball_catch_24cm_triview_validation.txt
+num_iterations: 20000
+ckpt_every_n_iters: 1000
+vis_every_n_iters: 5000
+num_vis_samples: 1
+eval_every_n_iters: 50000
+keep_n_ckpts: 8
+project: slarm
+exp_name: frozen_stereo_019999_newdata_cache

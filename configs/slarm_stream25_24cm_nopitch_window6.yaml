@@ -1,0 +1,98 @@
+# Stream25 streaming-reconstruction BASE -- 25 supervised frames, 6-context, pitch=0.
+# Streams native-stereo observations [0,3,6,9,12,15] through a window_6 stream and reconstructs
+# RGB, metric depth, four-class task semantics and dense MS3 for both native views at every
+# frame [0,25). NO Ball Query Probe / ball-state loss / VLA.
+#
+# Loaded via parse_args_with_yaml_config; every key below is a real main_slarm argparse dest.
+# Runtime artifacts are resolved relative to the repository root. They can still
+# be overridden through the normal main_slarm command-line arguments.
+
+model: slarm
+dataset: [ball_catch_24cm_stereo40_stream25_nopitch]
+data_root: ./data/SLARM_data
+
+# ---- backbone geometry (25-frame, 6-context contract) ----
+input_size: [320, 240]        # [H, W]
+patch_size: 8
+embed_dim: 768
+depth: 12
+patch_embed: conv
+num_max_cameras: 2
+num_context_timesteps: 6      # observations at frames [0, 3, 6, 9, 12, 15]
+num_target_timesteps: 7       # 1 anchor + 2 interpolation + 4 extrapolation per step
+context_stride: 3
+timespan: 0.8                 # supervised frame 24 -> normalized time 1.0
+mode: window_6
+
+# ---- backbone tokens (unchanged from the proven 24 cm backbone) ----
+use_affine_token: true
+use_sky_token: true
+use_ms3_motion: true          # MS3 degree 3 (velocity / acceleration / jerk)
+use_last_token: true
+shortcut_rgb: true
+add_patch_plucker_embed: true
+sigmoid_rgb: true
+num_motion_tokens: 0
+
+# ---- Stream25 reconstruction path ----
+strict_data_loading: true
+enable_task_semantic_head: true
+terminal_context_extrapolation: true
+stream25_render_target_chunk_size: 1
+stream25_reconstruction_loss: true
+
+# ---- ten explicit optimization weights, summed directly into the total ----
+stream25_rgb_weight: 1.00
+stream25_lpips_weight: 0.05
+stream25_ball_rgb_weight: 0.50
+stream25_depth_relative_weight: 1.00
+stream25_ball_depth_metric_weight: 0.02
+stream25_semantic_weight: 1.00
+stream25_lseg_feature_weight: 1.00
+stream25_ms3_ball_weight: 1.00
+stream25_ms3_static_weight: 0.25
+stream25_opacity_weight: 0.10
+
+# ---- MS3 physical normalization scales + terminal dynamic split ----
+stream25_ms3_velocity_scale: 5.0
+stream25_ms3_acceleration_scale: 9.81
+stream25_ms3_jerk_scale: 1.0
+terminal_dynamic_velocity_threshold: 1.0
+stream25_semantic_class_weight_cap: 10.0
+# Frozen inverse-sqrt weights from the final 800-scene _nopitch train audit.
+stream25_semantic_class_weights: [1.279402899049414, 10.0, 1.799483997084534, 3.7387573599271318]
+
+# ---- shared LSeg teacher + LPIPS + depth infrastructure ----
+online_feat: true
+img_norm_for_online_feat: true
+enable_feat_loss: true
+feat_loss_coeff: 1.0
+feat_loss_type: mse
+enable_depth_loss: true
+enable_sky_opacity_loss: true
+enable_perceptual_loss: true
+perceptual_weight: 0.05
+perceptual_loss_start_iter: 0
+load_depth: true
+lseg_model_scratch_path: ckpts/lseg/lseg_model_scratch.pth
+lseg_model_pretrained_path: ckpts/lseg/lseg_model_pretrained_replace_1x1conv_with_linear.pth
+
+# ---- optimizer / schedule (differential trunk/head LR, warmup 500, cosine to min_lr) ----
+lr: 1.0e-5                    # heads
+stream25_trunk_lr: 2.0e-6     # aggregator / patch embedding / shared latent norm
+lr_sched: cosine
+min_lr: 1.0e-6
+warmup_iters: 500
+batch_size: 1
+
+# ---- checkpoint init: model weights ONLY (no optimizer/scheduler/step/scaler) ----
+load_from: ckpts/ball_catch_24cm_ckpt_009999.pth
+
+# ---- full train/validation manifests and budget ----
+train_annotation: scene_list/ball_catch_24cm_stereo40_stream25_nopitch_train.txt
+eval_annotation: scene_list/ball_catch_24cm_stereo40_stream25_nopitch_validation.txt
+num_iterations: 20000
+ckpt_every_n_iters: 5000
+keep_n_ckpts: 4
+project: slarm
+exp_name: stream25_base_24cm_nopitch_window6
