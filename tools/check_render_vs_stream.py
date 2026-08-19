@@ -92,14 +92,28 @@ def load_scene(args, device, scene_index):
 
 
 def take_render(container):
-    """从 render_results / predictions 里抽出 RENDER_KEYS，转 cpu fp32。"""
+    """抽出 RENDER_KEYS，转 cpu fp32。
+
+    两条路径的存放位置不同：
+      - A: model(input_dict) 顶层就有 render_results 子dict，RGB/depth/flow/alpha/
+        semantic/ms3 都在里面。
+      - B: StreamSession.predictions 顶层只放了被 post_processing 提升的 semantic/ms3，
+        RGB/depth/flow/alpha 在 predictions["render_results"] 子dict 里。
+    所以这里同时扫描【render_results 子dict】和【顶层】，把 6 个量都收齐。
+    """
     out = {}
     if not isinstance(container, dict):
         return out
-    for k in RENDER_KEYS:
-        v = container.get(k)
-        if torch.is_tensor(v):
-            out[k] = v.detach().float().cpu()
+    pools = []
+    rr = container.get("render_results")
+    if isinstance(rr, dict):
+        pools.append(rr)
+    pools.append(container)
+    for pool in pools:
+        for k in RENDER_KEYS:
+            v = pool.get(k)
+            if k not in out and torch.is_tensor(v):
+                out[k] = v.detach().float().cpu()
     return out
 
 
@@ -143,7 +157,7 @@ def main():
     # ---------- Path A：整段一次前向 model(input_dict)（fp32，无 autocast）----------
     with torch.no_grad():
         pred_A = model(copy.copy(input_dict))
-    render_A = take_render(pred_A.get("render_results", {}))
+    render_A = take_render(pred_A)
 
     # ---------- 比对 ----------
     print("\n" + "=" * 96)
