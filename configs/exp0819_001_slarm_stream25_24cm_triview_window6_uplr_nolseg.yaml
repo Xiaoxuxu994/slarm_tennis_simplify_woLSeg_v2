@@ -60,7 +60,7 @@ perceptual_weight: 0.05
 perceptual_loss_start_iter: 0
 load_depth: true
 
-# ---- 优化（沿用 B 的大 LR + constant）----
+# ---- 优化（大 LR + cosine 衰减）----
 lr: 1.0e-4
 stream25_trunk_lr: 2e-5
 lr_sched: cosine        # from-init 训 40k，后期余弦衰减到 min_lr，收敛更精细
