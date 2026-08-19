@@ -31,14 +31,13 @@ terminal_context_extrapolation: true
 stream25_render_target_chunk_size: 1
 stream25_reconstruction_loss: true
 
-# ---- 损失权重（LSeg 特征项关闭）----
+# ---- 损失权重 ----
 stream25_rgb_weight: 1.00
 stream25_lpips_weight: 0.05
 stream25_ball_rgb_weight: 0.50
 stream25_depth_relative_weight: 1.00
 stream25_ball_depth_metric_weight: 0.02
 stream25_semantic_weight: 1.00
-stream25_lseg_feature_weight: 0.00        # 关闭 LSeg 特征蒸馏
 stream25_ms3_ball_weight: 1.00
 stream25_ms3_static_weight: 0.25
 stream25_opacity_weight: 0.10
