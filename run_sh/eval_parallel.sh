@@ -29,6 +29,7 @@ echo "并行 ${N} 张卡: ${GPUS}"
 echo "config: ${CONFIG}"
 echo "ckpt:   ${CKPT}"
 echo "out:    ${OUT_DIR}"
+echo "进度：各 shard 以 [shard i/N] 前缀交错打印本片进度；全部完成后自动合并"
 echo ""
 
 # 各卡各跑一个 shard，后台并行

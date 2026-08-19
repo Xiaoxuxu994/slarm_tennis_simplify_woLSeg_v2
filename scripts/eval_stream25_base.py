@@ -814,8 +814,11 @@ def run_evaluation(
     model.eval()
 
     scene_results = []
+    shard_indices = list(range(shard_id, len(dataset), num_shards))
+    shard_total = len(shard_indices)
+    shard_tag = f"[shard {shard_id}/{num_shards}] " if num_shards > 1 else ""
     with torch.inference_mode():
-        for index in range(shard_id, len(dataset), num_shards):
+        for count, index in enumerate(shard_indices, start=1):
             input_dict, target_dict = collate_and_prepare(dataset[index], args, torch_device)
             prepared = dict(input_dict)
             prepared.update(target_dict)
@@ -824,7 +827,7 @@ def run_evaluation(
             scene_result["scene_name"] = input_dict.get("scene_name", [str(index)])[0]
             scene_results.append(_compact_scene_result(scene_result))
             print(
-                f"Evaluated Stream25 {split} scene {index + 1}/{len(dataset)}",
+                f"{shard_tag}{split} scene {count}/{shard_total} (idx {index})",
                 flush=True,
             )
             del input_dict, target_dict, prepared
