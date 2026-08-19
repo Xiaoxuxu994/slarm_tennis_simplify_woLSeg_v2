@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-Core code lives under `src/`: models and streaming state are in `src/models/`, dataset loaders in `src/dataset/`, and losses, metrics, configuration helpers, and distributed utilities in `src/utils/`. Training entry point `main_slarm.py` and the shared `engine_tools.py` stay at the repository root (imported as top-level modules); all other launcher scripts (`inference_stream.py`, `eval_stream25_base.py`, `run_stream25_inference.py`, `train_stream25_base.py`, `compare_dump.py`, `compare_report.py`) live in `scripts/`, and their one-line `bash` wrappers live in `run_sh/`. Experiment YAML files belong in `configs/`. Retained helper libraries live in `tools/`. Treat `third_party/` as vendored code. `raw_data/`, `data/`, `work_dirs/`, and `ckpts/` contain local or generated artifacts and should not be committed.
+Core code lives under `src/`: models and streaming state are in `src/models/`, dataset loaders in `src/dataset/`, and losses, metrics, configuration helpers, and distributed utilities in `src/utils/`. Training entry point `main_slarm.py` and the shared `engine_tools.py` stay at the repository root (imported as top-level modules); the user-facing launcher scripts (`inference_stream.py`, `eval_stream25_base.py`, `render_stream25_base.py`, `train_stream25_base.py`) live in `scripts/`, and their one-line `bash` wrappers live in `run_sh/`. Experiment YAML files belong in `configs/`. Helper libraries and regression tools (`compare_dump.py` / `compare_report.py`) live in `tools/`. Treat `third_party/` as vendored code. `raw_data/`, `data/`, `work_dirs/`, and `ckpts/` contain local or generated artifacts and should not be committed.
 
 ## Build, Test, and Development Commands
 

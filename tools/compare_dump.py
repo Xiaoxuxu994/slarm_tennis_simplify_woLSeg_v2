@@ -11,14 +11,14 @@
 
   # 1) 先跑 baseline（simplify）—— 它会构建 eval dataset 取第一个 batch，
   #    并把原始 data_dict 存到 --shared_batch，供另外两套复用（保证输入逐比特一致）
-  SLARM_SINGLE_PROCESS=1 python scripts/compare_dump.py \
+  SLARM_SINGLE_PROCESS=1 python tools/compare_dump.py \
       --config <你平时 eval 用的 yaml> \
       --load_from <训练好的 ckpt.pth> \
       --shared_batch /abs/path/shared_batch.pt \
       --dump_out dump_baseline.pt
 
   # 2) 再到 woLSeg / woLSeg_v2 目录，用同一个 ckpt、同一个 shared_batch 跑
-  SLARM_SINGLE_PROCESS=1 python scripts/compare_dump.py \
+  SLARM_SINGLE_PROCESS=1 python tools/compare_dump.py \
       --config <同一个 yaml> --load_from <同一个 ckpt.pth> \
       --shared_batch /abs/path/shared_batch.pt --dump_out dump_v2.pt
 
@@ -30,7 +30,7 @@ import os
 import sys
 import torch
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root on sys.path (脚本位于 scripts/)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root on sys.path (脚本位于 tools/)
 os.environ.setdefault("SLARM_SINGLE_PROCESS", "1")
 
 from main_slarm import (
