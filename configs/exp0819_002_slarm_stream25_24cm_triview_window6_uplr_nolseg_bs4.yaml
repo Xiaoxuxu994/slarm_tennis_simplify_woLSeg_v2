@@ -56,6 +56,8 @@ stream25_semantic_class_weight_cap: 10.0
 # ---- 无 LSeg ----
 online_feat: false
 enable_feat_loss: false
+feat_loss_coeff: 0.0                 # 显式归零，避免 log 里显示 default 1.0 引起误解
+stream25_lseg_feature_weight: 0.0    # 同上（loss 本就硬编码 0，这里只为 log 清晰）
 enable_depth_loss: true
 enable_sky_opacity_loss: true
 enable_perceptual_loss: true
