@@ -63,7 +63,7 @@ load_depth: true
 # ---- 优化（沿用 B 的大 LR + constant）----
 lr: 1.0e-4
 stream25_trunk_lr: 2e-5
-lr_sched: constant
+lr_sched: cosine        # from-init 训 40k，后期余弦衰减到 min_lr，收敛更精细
 min_lr: 1.0e-6
 warmup_iters: 1000
 batch_size: 1        # 加大需同步提 LR(linear: batch×N → lr×N)+ 加长 warmup；先试 batch=2 确认跑通
