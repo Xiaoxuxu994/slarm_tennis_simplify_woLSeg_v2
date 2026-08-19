@@ -729,8 +729,16 @@ def run_evaluation(
     output_markdown: Optional[str] = None,
     device: str = "cuda",
     reference: bool = False,
+    num_shards: int = 1,
+    shard_id: int = 0,
+    scene_results_out: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Run full evaluation on a split. For final-test, require a selection report."""
+    """Run full evaluation on a split. For final-test, require a selection report.
+
+    多卡并行：num_shards>1 时本进程只处理 index % num_shards == shard_id 的场景，
+    并把 per-scene 结果写到 scene_results_out（不做聚合）；最终由 merge_partials 合并。
+    默认 (num_shards=1, shard_id=0, scene_results_out=None) 即单卡全量行为，不变。
+    """
     if split == "final-test":
         if selection_report is None:
             raise ValueError("final-test evaluation requires a frozen selection report")
@@ -807,7 +815,7 @@ def run_evaluation(
 
     scene_results = []
     with torch.inference_mode():
-        for index in range(len(dataset)):
+        for index in range(shard_id, len(dataset), num_shards):
             input_dict, target_dict = collate_and_prepare(dataset[index], args, torch_device)
             prepared = dict(input_dict)
             prepared.update(target_dict)
@@ -820,6 +828,53 @@ def run_evaluation(
                 flush=True,
             )
             del input_dict, target_dict, prepared
+
+    if scene_results_out is not None:
+        _dump_partial(scene_results, scene_results_out, shard_id, num_shards)
+        return {
+            "partial": True,
+            "shard_id": shard_id,
+            "num_shards": num_shards,
+            "scene_count": len(scene_results),
+        }
+
+    return _finalize_and_write(
+        scene_results,
+        split=split,
+        checkpoint_path=checkpoint_path,
+        config_path=config_path,
+        manifest=manifest,
+        evaluation_seed=evaluation_seed,
+        reference=reference,
+        output_json=output_json,
+        output_markdown=output_markdown,
+    )
+
+
+def _dump_partial(scene_results, path, shard_id, num_shards):
+    """shard 模式：把本片的 per-scene 结果写到中间文件，供 merge 合并。"""
+    with open(path, "w") as f:
+        json.dump(_json_safe(scene_results), f)
+    print(f"[shard {shard_id}/{num_shards}] {len(scene_results)} scenes -> {path}", flush=True)
+
+
+def _finalize_and_write(
+    scene_results,
+    *,
+    split,
+    checkpoint_path,
+    config_path,
+    manifest,
+    evaluation_seed,
+    reference,
+    output_json,
+    output_markdown,
+):
+    """对（可能来自多个 shard 合并的）全量 scene_results 做一次完整聚合并写出。"""
+    from tools.stream25_runtime import sha256_file
+
+    # 按 scene_index 排序，保证与单卡逐场景顺序一致、结果可复现
+    scene_results = sorted(scene_results, key=lambda s: s.get("scene_index", 0))
 
     gate_result = summarize_stream25_scene_results(scene_results)
     scope_reports = gate_result["scope_reports"]
@@ -892,6 +947,42 @@ def run_evaluation(
     return result
 
 
+def merge_partials(
+    partial_paths,
+    *,
+    config_path,
+    checkpoint_path,
+    split,
+    output_json=None,
+    output_markdown=None,
+    reference=False,
+):
+    """读取各 shard 的 per-scene 结果，合并后做一次完整聚合并写出（不占用 GPU）。"""
+    from tools.stream25_runtime import annotation_path, load_stream25_args
+
+    scene_results: List[Dict[str, Any]] = []
+    for p in partial_paths:
+        with open(p) as f:
+            scene_results.extend(json.load(f))
+
+    args = load_stream25_args(
+        config_path, checkpoint_path=checkpoint_path, checkpoint_role="evaluation"
+    )
+    evaluation_seed = set_evaluation_seed(args.seed)
+    manifest = annotation_path(args, split)
+    return _finalize_and_write(
+        scene_results,
+        split=split,
+        checkpoint_path=checkpoint_path,
+        config_path=config_path,
+        manifest=manifest,
+        evaluation_seed=evaluation_seed,
+        reference=reference,
+        output_json=output_json,
+        output_markdown=output_markdown,
+    )
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -903,16 +994,41 @@ if __name__ == "__main__":
     parser.add_argument("--output-markdown", default=None)
     parser.add_argument("--selection-report", default=None)
     parser.add_argument("--reference", action="store_true")
+    # ---- 多卡并行：按 shard 切分场景，各进程各占一卡；最后 merge 合并聚合 ----
+    parser.add_argument("--num-shards", type=int, default=1,
+                        help="总分片数（一般 = 并行进程数 / 卡数）")
+    parser.add_argument("--shard-id", type=int, default=0,
+                        help="本进程处理的分片编号，取值 [0, num_shards)")
+    parser.add_argument("--scene-results-out", default=None,
+                        help="shard 模式：把本片 per-scene 结果写到该文件，不做聚合")
+    parser.add_argument("--merge", nargs="*", default=None,
+                        help="合并模式：给出各 shard 的 per-scene 结果文件，合并聚合并写最终结果")
     args = parser.parse_args()
 
-    sel = None
-    if args.selection_report:
-        with open(args.selection_report) as f:
-            sel = json.load(f)
+    if args.merge:
+        result = merge_partials(
+            args.merge,
+            config_path=args.config,
+            checkpoint_path=args.checkpoint,
+            split=args.split,
+            output_json=args.output,
+            output_markdown=args.output_markdown,
+            reference=args.reference,
+        )
+        print(f"[merge] {len(args.merge)} shards, {result['scene_count']} scenes "
+              f"-> {args.output}  overall={result['overall']}")
+    else:
+        sel = None
+        if args.selection_report:
+            with open(args.selection_report) as f:
+                sel = json.load(f)
 
-    result = run_evaluation(
-        args.config, args.checkpoint, args.split,
-        selection_report=sel, output_json=args.output,
-        output_markdown=args.output_markdown, reference=args.reference,
-    )
-    print(json.dumps(result, indent=2))
+        result = run_evaluation(
+            args.config, args.checkpoint, args.split,
+            selection_report=sel, output_json=args.output,
+            output_markdown=args.output_markdown, reference=args.reference,
+            num_shards=args.num_shards, shard_id=args.shard_id,
+            scene_results_out=args.scene_results_out,
+        )
+        if args.scene_results_out is None:
+            print(json.dumps(result, indent=2))
