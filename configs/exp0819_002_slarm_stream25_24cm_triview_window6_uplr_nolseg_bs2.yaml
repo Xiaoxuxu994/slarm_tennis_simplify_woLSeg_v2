@@ -1,7 +1,7 @@
-# Tri-view Stream25 大 LR baseline（无 LSeg）—— 吃满 80G A100 的加速版：
-#   关闭 grad checkpointing + batch=4 + LR 按 sqrt 缩放。
-# 注意：这是「利用显存加速」的探索版，改了 batch/LR，与 batch=1 的 exp0819_001 不可比；
-#       干净 baseline 仍以 exp0819_001 为准。
+# Tri-view Stream25 No-LSeg —— batch=2 对照（002）。
+# 与 batch=1 的 exp0819_001 在数值上只差 batch：
+#   chunk 与 001 相同(=7)；仅 grad checkpointing(关 vs 开)不同，而它不影响数值、只为提速；
+#   LR 保持与 001 相同(1e-4 / 2e-5)不放大，先干净看 batch 的影响；若收敛明显变慢再单独 scale LR。
 model: slarm
 dataset: [ball_catch_24cm_triview]
 data_root: data/SLARM_data
@@ -33,7 +33,7 @@ disable_grad_checkpointing: true
 strict_data_loading: true
 enable_task_semantic_head: true
 terminal_context_extrapolation: true
-stream25_render_target_chunk_size: 1
+stream25_render_target_chunk_size: 7   # 与 001 一致；实测 chunk=7 + 关 checkpointing + bs=2 可跑
 stream25_reconstruction_loss: true
 
 # ---- 损失权重 ----
@@ -65,13 +65,13 @@ perceptual_weight: 0.05
 perceptual_loss_start_iter: 0
 load_depth: true
 
-# ---- 优化：batch=4，LR 按 sqrt(4)=2× 缩放（比 linear 4× 稳，大 batch 常用）----
-lr: 2.0e-4
-stream25_trunk_lr: 4e-5
+# ---- 优化：batch=2，LR 与 001 一致(不放大) ----
+lr: 1.0e-4
+stream25_trunk_lr: 2e-5
 lr_sched: constant
 min_lr: 1.0e-6
-warmup_iters: 2500      # 大 batch + 大 LR + 随机头，前期加长 warmup 防发散
-batch_size: 4
+warmup_iters: 1000
+batch_size: 2
 seed: 20260730
 
 # waymo→triview 迁移 init（一步到位大 LR）
@@ -86,4 +86,4 @@ num_vis_samples: 1
 eval_every_n_iters: 50000
 keep_n_ckpts: 20
 project: slarm
-exp_name: exp0819_002_slarm_stream25_24cm_triview_window6_uplr_nolseg_bs4
+exp_name: exp0819_002_slarm_stream25_24cm_triview_window6_uplr_nolseg_bs2
