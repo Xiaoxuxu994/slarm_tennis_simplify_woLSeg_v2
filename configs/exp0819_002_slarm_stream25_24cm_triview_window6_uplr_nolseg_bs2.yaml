@@ -27,6 +27,7 @@ add_patch_plucker_embed: true
 sigmoid_rgb: true
 num_motion_tokens: 0
 
+disable_grad_checkpointing: false   # false = 不禁用 → grad checkpointing 开（省显存）
 strict_data_loading: true
 enable_task_semantic_head: true
 terminal_context_extrapolation: true
