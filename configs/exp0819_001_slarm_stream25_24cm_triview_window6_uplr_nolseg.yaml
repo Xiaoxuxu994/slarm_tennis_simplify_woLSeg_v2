@@ -64,7 +64,7 @@ stream25_trunk_lr: 2e-5
 lr_sched: constant
 min_lr: 1.0e-6
 warmup_iters: 1000
-batch_size: 1
+batch_size: 1        # 加大需同步提 LR(linear: batch×N → lr×N)+ 加长 warmup；先试 batch=2 确认跑通
 seed: 20260730
 
 # waymo→triview 迁移 init（一步到位大 LR）；两段式则换成已训好的 tri-view ckpt
@@ -73,11 +73,11 @@ load_from: ckpts/ckpt_003999_slarm_trans.pth
 
 train_annotation: scene_list/ball_catch_24cm_triview_train.txt
 eval_annotation: scene_list/ball_catch_24cm_triview_validation.txt
-num_iterations: 20000
-ckpt_every_n_iters: 1000
+num_iterations: 40000
+ckpt_every_n_iters: 2000    # 40k/2k=20 个存档，配 keep 20 全留，便于按 eval 挑最优 ckpt
 vis_every_n_iters: 5000
 num_vis_samples: 1
 eval_every_n_iters: 50000
-keep_n_ckpts: 10
+keep_n_ckpts: 20
 project: slarm
 exp_name: exp0819_001_slarm_stream25_24cm_triview_window6_uplr_nolseg
