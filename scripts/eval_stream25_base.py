@@ -937,6 +937,7 @@ def _finalize_and_write(
         with open(output_json, "w") as f:
             json.dump(result, f, indent=2, allow_nan=False)
     if output_markdown:
+        from src.utils.stream25_report import render_single_markdown
         lines = [
             "# Stream25 Evaluation",
             "",
@@ -946,7 +947,11 @@ def _finalize_and_write(
             f"- Considered frame-eyes: **{result['considered_frame_eyes']}**",
             f"- Overall: **{result['overall']}**",
             "",
-            "## Gate metrics",
+            "## 关键指标（aggregate）",
+            "",
+            render_single_markdown(result["metrics"]),
+            "",
+            "## Gate metrics (full)",
             "",
             "```json",
             json.dumps(result["metrics"], indent=2, allow_nan=False),
