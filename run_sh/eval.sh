@@ -38,7 +38,6 @@ bash run_sh/eval_stream25_base.sh \
     --config "${CONFIG}" \
     --checkpoint "${CKPT}" \
     --split validation \
-    --render-chunk 25 \
     --output "${OUT_DIR}/evaluation.json" \
     --output-markdown "${OUT_DIR}/evaluation.md" \
     "$@"
