@@ -8,6 +8,7 @@ GPUS="0,1,2,3"
 CONFIG="configs/slarm_stream25_24cm_triview_window6.yaml"
 CKPT="ckpts/ckpt_034999.pth"
 SPLIT="validation"
+RENDER_CHUNK="25"   # 一次渲完 25 个 target（config 默认 1 = 逐帧渲染，极慢）；OOM 就降到 7
 
 # CONFIG="configs/exp0814_slarm_stream25_24cm_triview_window6_reproduce.yaml"
 # CKPT="work_dirs/slarm/exp0814_slarm_stream25_24cm_triview_window6_reproduce/checkpoints/ckpt_039999.pth"
@@ -39,6 +40,7 @@ for i in "${!GPU_ARR[@]}"; do
         python scripts/eval_stream25_base.py \
             --config "${CONFIG}" --checkpoint "${CKPT}" --split "${SPLIT}" \
             --num-shards "${N}" --shard-id "${i}" \
+            --render-chunk "${RENDER_CHUNK}" \
             --scene-results-out "${PART_DIR}/part_${i}.json" &
     pids+=("$!")
 done

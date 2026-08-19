@@ -732,6 +732,7 @@ def run_evaluation(
     num_shards: int = 1,
     shard_id: int = 0,
     scene_results_out: Optional[str] = None,
+    render_chunk: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Run full evaluation on a split. For final-test, require a selection report.
 
@@ -812,6 +813,12 @@ def run_evaluation(
     dataset = build_stream25_dataset(args, split, online_feat=False)
     model = build_stream25_model(args, torch_device)
     model.eval()
+    if render_chunk is not None:
+        model.render_target_chunk_size = int(render_chunk)
+        print(
+            f"[eval] render_target_chunk_size override -> {model.render_target_chunk_size}",
+            flush=True,
+        )
 
     scene_results = []
     shard_indices = list(range(shard_id, len(dataset), num_shards))
@@ -1004,6 +1011,8 @@ if __name__ == "__main__":
                         help="本进程处理的分片编号，取值 [0, num_shards)")
     parser.add_argument("--scene-results-out", default=None,
                         help="shard 模式：把本片 per-scene 结果写到该文件，不做聚合")
+    parser.add_argument("--render-chunk", type=int, default=None,
+                        help="覆盖 render_target_chunk_size；eval 有 25 个 target，设 25 可一次渲完、大幅提速")
     parser.add_argument("--merge", nargs="*", default=None,
                         help="合并模式：给出各 shard 的 per-scene 结果文件，合并聚合并写最终结果")
     args = parser.parse_args()
@@ -1032,6 +1041,7 @@ if __name__ == "__main__":
             output_markdown=args.output_markdown, reference=args.reference,
             num_shards=args.num_shards, shard_id=args.shard_id,
             scene_results_out=args.scene_results_out,
+            render_chunk=args.render_chunk,
         )
         if args.scene_results_out is None:
             print(json.dumps(result, indent=2))
