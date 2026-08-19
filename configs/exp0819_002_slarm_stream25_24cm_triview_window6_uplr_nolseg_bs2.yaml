@@ -1,7 +1,7 @@
-# Tri-view Stream25 No-LSeg —— batch=2 对照（002）。
-# 与 batch=1 的 exp0819_001 在数值上只差 batch：
-#   chunk 与 001 相同(=7)；仅 grad checkpointing(关 vs 开)不同，而它不影响数值、只为提速；
-#   LR 保持与 001 相同(1e-4 / 2e-5)不放大，先干净看 batch 的影响；若收敛明显变慢再单独 scale LR。
+# Tri-view Stream25 No-LSeg —— batch=2 对照（002）。checkpointing 开（同 001）。
+# 与 001 数值上只差 batch：LR 保持一致(1e-4/2e-5)不放大，先干净看 batch 的影响；
+# 收敛明显变慢再单独 scale LR。
+# 注意：render_target_chunk_size 由 train.sh 命令行传入（会覆盖此处的值）。
 model: slarm
 dataset: [ball_catch_24cm_triview]
 data_root: data/SLARM_data
@@ -26,9 +26,6 @@ shortcut_rgb: true
 add_patch_plucker_embed: true
 sigmoid_rgb: true
 num_motion_tokens: 0
-
-# 显存充足时关闭 grad checkpointing：不再重算激活，前向/反向更快
-disable_grad_checkpointing: true
 
 strict_data_loading: true
 enable_task_semantic_head: true
