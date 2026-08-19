@@ -14,8 +14,9 @@ DEVICE_NUM=$(awk -F',' '{print NF}' <<< "${GPUS}")
 export CUDA_VISIBLE_DEVICES="${GPUS}"
 export FEAT_DIST=1
 
-# 一次性渲染全部 7 个 target，而不是 7 次单独调用
-EXTRA_ARGS=(--stream25_render_target_chunk_size 7)
+# 一次性渲染全部 7 个 target，而不是 7 次单独调用；并开启 TensorBoard 记录
+# TensorBoard event 写到 <output_dir>/<project>/<exp_name>/tensorboard/
+EXTRA_ARGS=(--stream25_render_target_chunk_size 7 --enable_tensorboard)
 
 if [ "${DEVICE_NUM}" -gt 1 ]; then
     exec torchrun --nproc_per_node="${DEVICE_NUM}" --master_port 16818 \
