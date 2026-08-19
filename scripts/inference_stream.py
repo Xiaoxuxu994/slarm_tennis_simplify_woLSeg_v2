@@ -13,6 +13,9 @@ import torch
 import torch.backends.cudnn as cudnn
 import torch.utils.data
 
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root on sys.path (脚本位于 scripts/)
+
 import src.utils.misc as misc
 from engine_tools import build_model
 from src.dataset.constants import DATASET_DICT

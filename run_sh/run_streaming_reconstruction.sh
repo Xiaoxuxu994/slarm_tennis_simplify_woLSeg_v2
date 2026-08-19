@@ -9,4 +9,4 @@ export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 export FEAT_DIST="${FEAT_DIST:-1}"
 
 cd "${REPO_ROOT}"
-exec "${PYTHON}" "${REPO_ROOT}/tools/run_stream25_inference.py" "$@"
+exec "${PYTHON}" "${REPO_ROOT}/scripts/run_stream25_inference.py" "$@"

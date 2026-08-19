@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-Core code lives under `src/`: models and streaming state are in `src/models/`, dataset loaders in `src/dataset/`, and losses, metrics, configuration helpers, and distributed utilities in `src/utils/`. Top-level entry points include `main_slarm.py` for training and `inference.py` / `inference_stream.py` for evaluation. Experiment YAML files belong in `configs/`. Preprocessing and retained runtime CLIs live in `preproc/` and `tools/`. Treat `third_party/` as vendored code. `raw_data/`, `data/`, `work_dirs/`, and `ckpts/` contain local or generated artifacts and should not be committed.
+Core code lives under `src/`: models and streaming state are in `src/models/`, dataset loaders in `src/dataset/`, and losses, metrics, configuration helpers, and distributed utilities in `src/utils/`. Training entry point `main_slarm.py` and the shared `engine_tools.py` stay at the repository root (imported as top-level modules); all other launcher scripts (`inference_stream.py`, `eval_stream25_base.py`, `run_stream25_inference.py`, `train_stream25_base.py`, `compare_dump.py`, `compare_report.py`) live in `scripts/`, and their one-line `bash` wrappers live in `run_sh/`. Experiment YAML files belong in `configs/`. Retained helper libraries live in `tools/`. Treat `third_party/` as vendored code. `raw_data/`, `data/`, `work_dirs/`, and `ckpts/` contain local or generated artifacts and should not be committed.
 
 ## Build, Test, and Development Commands
 
@@ -13,7 +13,7 @@ conda create -n SLARM python=3.10 -y
 pip install -r requirements.txt
 ```
 
-Train upstream SLARM with `torchrun --nproc_per_node=1 main_slarm.py --config configs/<experiment>.yaml`. Use `bash scripts/train_stream25_base.sh stereo` or `triview` for the retained full Stream25 runs, and `bash scripts/train_catch_state_reader.sh` for the two-GPU full reader run. Keep generated datasets, token caches, and checkpoints out of Git.
+Train upstream SLARM with `torchrun --nproc_per_node=1 main_slarm.py --config configs/<experiment>.yaml`. Use `bash run_sh/train_stream25_base.sh stereo` or `triview` for the retained full Stream25 runs. Keep generated datasets, token caches, and checkpoints out of Git.
 
 ## Coding Style & Naming Conventions
 

@@ -313,7 +313,7 @@ L_total     = L_xy + L_velocity + 0.1·L_attention
 
 ## 7. 评估指标(Metric)与验收表
 
-评估在 `tools/eval_stream25_base.py`,指标定义在 `src/utils/stream25_metrics.py`。核心是**三层结构 + 六时间桶 + 硬验收门**。
+评估在 `scripts/eval_stream25_base.py`,指标定义在 `src/utils/stream25_metrics.py`。核心是**三层结构 + 六时间桶 + 硬验收门**。
 
 ### 7.1 六个时间桶
 
@@ -453,7 +453,7 @@ L_total     = L_xy + L_velocity + 0.1·L_attention
 | 接球损失 | `src/utils/catch_state_losses.py` | `compute_catch_state_losses:31` |
 | MS3 物理 | `src/models/temporal_ownership.py` | 运动方程 `:16` |
 | 评估指标 | `src/utils/stream25_metrics.py` | `ACCEPTANCE_TABLE:30`、`compute_ms3_vector_error:163`、`integrate_frame24_position:168` |
-| base 评估 | `tools/eval_stream25_base.py` | `apply_acceptance_gates:66`、`scope_reports:144` |
+| base 评估 | `scripts/eval_stream25_base.py` | `apply_acceptance_gates:66`、`scope_reports:144` |
 | 接球指标 | `src/utils/catch_state_metrics.py` | `compute_per_sample_catch_metrics:27` |
 | 数据采集监督 | `data_gen/isaac_generation_supervisor.py` | `main:147` |
 | 物理渲染 | `data_gen/isaac_replicator.py` | `generate_scene:234`、`validate_scene_completion:775` |

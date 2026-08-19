@@ -193,9 +193,9 @@ frozen SLARM + frozen CLIP prompt + trainable/frozen Reader
 | `tools/prepare_reader_ablation_data.py` | 转换新增 raw 场景、执行硬审计并发布训练清单 |
 | `configs/slarm_stream25_24cm_nopitch_window6.yaml` | 双目 full base |
 | `configs/slarm_stream25_24cm_triview_window6.yaml` | 三目 full base |
-| `scripts/train_stream25_base.sh` | 选择 `stereo` 或 `triview` 并启动 base |
-| `tools/run_stream25_inference.py` | 按六帧契约生成用户指定时长的重建视频 |
-| `scripts/run_streaming_reconstruction.sh` | 重建视频的一键入口 |
+| `run_sh/train_stream25_base.sh` | 选择 `stereo` 或 `triview` 并启动 base |
+| `scripts/run_stream25_inference.py` | 按六帧契约生成用户指定时长的重建视频 |
+| `run_sh/run_streaming_reconstruction.sh` | 重建视频的一键入口 |
 | `tools/build_catch_prompt_artifact.py` | 从本地 CLIP 权重生成固定 prompt artifact |
 | `tools/build_catch_state_cache.py` | 用三目 base 生成 train/validation token cache |
 | `tools/build_temporal_catch_state_cache.py` | 生成 frame 9/12/15 perception-token cache |
@@ -384,7 +384,7 @@ data/SLARM_data/
 ### 8.2 启动
 
 ```bash
-bash scripts/train_stream25_base.sh triview
+bash run_sh/train_stream25_base.sh triview
 ```
 
 `--resume_from`
@@ -403,7 +403,7 @@ camera affine token 初始化三个当前相机，并按固定 seed 新建四类
 输出不含 optimizer、step 或 scaler，必须作为 `load_from` 从 step 0 训练：
 
 ```bash
-bash scripts/train_stream25_base.sh triview \
+bash run_sh/train_stream25_base.sh triview \
   --config configs/slarm_stream25_24cm_triview_from_original_window6.yaml
 ```
 
@@ -538,7 +538,7 @@ L = L_xy
 ```bash
 mkdir -p work_dirs/slarm/stream25_eval/ckpt_034999
 
-bash scripts/eval_stream25_base.sh \
+bash run_sh/eval_stream25_base.sh \
   --config configs/slarm_stream25_24cm_triview_window6.yaml \
   --checkpoint ckpts/ckpt_034999.pth \
   --split validation \
@@ -573,7 +573,7 @@ bash scripts/eval_catch_state_reader.sh \
 ### 11.1 生成指定帧数的重建视频
 
 ```bash
-bash scripts/run_streaming_reconstruction.sh \
+bash run_sh/run_streaming_reconstruction.sh \
   --config configs/slarm_stream25_24cm_triview_window6.yaml \
   --checkpoint ckpts/triview_stage_a.pth \
   --data_root data/SLARM_data \

@@ -8,4 +8,4 @@ PYTHON="${PYTHON:-${PYTHON_BIN:-python}}"
 export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
 cd "${REPO_ROOT}"
-exec "${PYTHON}" "${REPO_ROOT}/tools/eval_stream25_base.py" "$@"
+exec "${PYTHON}" "${REPO_ROOT}/scripts/eval_stream25_base.py" "$@"

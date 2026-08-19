@@ -1,7 +1,7 @@
 """Streaming reconstruction inference with a configurable render horizon."""
 import os, sys, torch, numpy as np, imageio
 os.environ.setdefault("FEAT_DIST", "1")
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root on sys.path (脚本已从 tools/ 移入 scripts/)
 
 from src.dataset.datasets import Stream25Dataset
 from src.dataset.data_utils import to_batch_tensor, prepare_inputs_and_targets
