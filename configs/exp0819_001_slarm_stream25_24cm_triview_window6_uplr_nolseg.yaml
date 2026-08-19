@@ -28,7 +28,7 @@ num_motion_tokens: 0
 strict_data_loading: true
 enable_task_semantic_head: true
 terminal_context_extrapolation: true
-stream25_render_target_chunk_size: 1
+stream25_render_target_chunk_size: 7   # 一次渲全部 7 个 target，更快；数值与 1 等价，只是更吃显存
 stream25_reconstruction_loss: true
 
 # ---- 损失权重 ----
