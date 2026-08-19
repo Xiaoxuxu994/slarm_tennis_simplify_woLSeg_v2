@@ -60,10 +60,10 @@ perceptual_weight: 0.05
 perceptual_loss_start_iter: 0
 load_depth: true
 
-# ---- 优化（大 LR + cosine 衰减）----
+# ---- 优化（大 LR + constant，沿用 B 验证过的配方）----
 lr: 1.0e-4
 stream25_trunk_lr: 2e-5
-lr_sched: cosine        # from-init 训 40k，后期余弦衰减到 min_lr，收敛更精细
+lr_sched: constant      # B 验证过“大 LR + constant”work；cosine 留作后续单独实验
 min_lr: 1.0e-6
 warmup_iters: 1000
 batch_size: 1        # 加大需同步提 LR(linear: batch×N → lr×N)+ 加长 warmup；先试 batch=2 确认跑通
