@@ -25,6 +25,7 @@
 """
 import os
 import sys
+import time
 import argparse
 import itertools
 
@@ -138,6 +139,7 @@ def main():
     gt_accel_samples = []   # GT 球加速度(rig) 采样，用于核对重力
 
     for index in range(n):
+        t0 = time.time()
         input_dict, target_dict = collate_and_prepare(dataset[index], args, device)
         prepared = dict(input_dict)
         prepared.update(target_dict)
@@ -174,8 +176,7 @@ def main():
             pass
 
         del input_dict, target_dict, prepared, scene
-        if (index + 1) % 20 == 0:
-            print(f"  {index + 1}/{n}", flush=True)
+        print(f"  scene {index + 1}/{n}  ({time.time() - t0:.1f}s)", flush=True)
 
     if gt_accel_samples:
         g_mean = torch.stack(gt_accel_samples).mean(dim=0)
