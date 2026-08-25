@@ -224,24 +224,24 @@ def main():
 
     if gt_accel_samples:
         g_mean = torch.stack(gt_accel_samples).mean(dim=0)
-        print(f"\n[核对] GT 球加速度(rig) 均值 = {g_mean.tolist()}  （应≈重力；据此核对 --gravity）")
+        print(f"\n[check] GT ball accel(rig) mean = {g_mean.tolist()}  (should be ~= gravity; use to verify --gravity)")
 
     sources = [s for s in ("pred", "gt") if per_scene and s in per_scene[0][0]]
 
     # ① pos15 起点误差（frame24 的"地板"：外推再准也超不过它）
     print("\n" + "=" * 72)
-    print(f"{'球区域':8s} {'指标':16s} {'median':>10s} {'p95':>10s} {'有效场景':>8s}")
+    print(f"{'region':8s} {'metric':16s} {'median':>10s} {'p95':>10s} {'n_valid':>8s}")
     print("-" * 72)
     for src in sources:
         errs = [_pos15_error(states[src], gp15) for (states, _g24, gp15, _dt) in per_scene]
         finite = [e for e in errs if e == e]
         med = finite_percentile(finite, 50) if finite else float("nan")
         p95 = finite_percentile(finite, 95) if finite else float("nan")
-        print(f"{src:8s} {'pos15 起点误差':16s} {med:10.4f} {p95:10.4f} {len(finite):8d}")
+        print(f"{src:8s} {'pos15_error':16s} {med:10.4f} {p95:10.4f} {len(finite):8d}")
     print("=" * 72)
 
     # ①b pos15 误差分解：沿视线(depth 期望值误差) vs 横向(球定位误差)
-    print(f"{'球区域':8s} {'pos15 分解':14s} {'沿视线med':>10s} {'沿视线p95':>10s} {'横向med':>10s} {'横向p95':>10s}")
+    print(f"{'region':8s} {'pos15_split':14s} {'along_med':>10s} {'along_p95':>10s} {'lat_med':>10s} {'lat_p95':>10s}")
     print("-" * 72)
     for src in sources:
         decs = [_pos15_decompose(states[src], gp15) for (states, _g24, gp15, _dt) in per_scene]
@@ -252,14 +252,14 @@ def main():
         ap = finite_percentile(along, 95) if along else float("nan")
         lm = finite_percentile(lateral, 50) if lateral else float("nan")
         lp = finite_percentile(lateral, 95) if lateral else float("nan")
-        print(f"{src:8s} {'沿视线/横向':14s} {am:10.4f} {ap:10.4f} {lm:10.4f} {lp:10.4f}")
+        print(f"{src:8s} {'along/lateral':14s} {am:10.4f} {ap:10.4f} {lm:10.4f} {lp:10.4f}")
     print("=" * 72)
 
     # ② frame24 落点误差（三种外推 × 球区域来源）
-    print(f"{'球区域':8s} {'外推':12s} {'median':>10s} {'p95':>10s} {'有效场景':>8s}")
+    print(f"{'region':8s} {'extrap':12s} {'median':>10s} {'p95':>10s} {'n_valid':>8s}")
     print("-" * 72)
     for src in sources:
-        for strat, name in [("free", "free(现状)"), ("phys", "phys(物理)"), ("linear", "linear")]:
+        for strat, name in [("free", "free(current)"), ("phys", "phys(gravity)"), ("linear", "linear")]:
             errs = [
                 _scene_error(states[src], g24, dt, gravity, strat)
                 for (states, g24, _gp15, dt) in per_scene
@@ -269,11 +269,12 @@ def main():
             p95 = finite_percentile(finite, 95) if finite else float("nan")
             print(f"{src:8s} {name:12s} {med:10.4f} {p95:10.4f} {len(finite):8d}")
     print("=" * 72)
-    print("解读：")
-    print("  pos15 起点误差 = frame24 的地板；pred 与 gt 的差 = 选球错的代价")
-    print("  pred×phys ≈ pred×free → 外推(a/j)不是瓶颈")
-    print("  gt×* 比 pred×* 低很多 → 选球(语义)是瓶颈 → ball token 直接回归位置最值")
-    print("  frame24 减去 pos15 的剩余 → v15(速度)与外推的贡献")
+    print("Readout:")
+    print("  pos15_error = frame24 floor; (pred - gt) = cost of ball-selection error")
+    print("  along vs lateral: along = depth expected-value error, lateral = localization error")
+    print("  pred x phys ~= pred x free  -> extrapolation (a/j) is NOT the bottleneck")
+    print("  gt x * << pred x *  -> ball selection is the bottleneck -> ball token")
+    print("  frame24 minus pos15  -> contribution of v15 (velocity) + extrapolation")
 
 
 if __name__ == "__main__":
