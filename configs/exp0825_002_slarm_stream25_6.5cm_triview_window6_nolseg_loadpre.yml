@@ -4,7 +4,7 @@
 #       只要在 6.5cm 上续训就会逼模型重新学会分小球；关键是大 LR(shift大) + 球深度监督。
 model: slarm
 dataset: [ball_catch_6.5cm_triview]        # ★ 6.5cm 数据（需已在 constants.py 注册，且数据 JSON 的 "dataset" 字段一致）
-data_root: data/SLARM_data
+data_root: data/SLARM_data_6.5
 
 input_size: [320, 240]
 patch_size: 8
