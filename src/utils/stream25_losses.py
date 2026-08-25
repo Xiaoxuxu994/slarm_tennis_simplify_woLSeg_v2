@@ -24,6 +24,9 @@ STREAM25_LOSS_WEIGHTS: Dict[str, float] = {
     "ms3_ball": 1.00,
     "ms3_static": 0.25,
     "opacity": 0.10,
+    # 内建 ball token 监督（默认权重 1.0；仅在模型输出 ball_pos15 时生效）
+    "ball_pos": 1.0,
+    "ball_vel": 1.0,
 }
 
 STREAM25_MS3_SCALES = {"velocity": 5.0, "acceleration": 9.81, "jerk": 1.0}
@@ -401,6 +404,22 @@ def compute_stream25_loss(
     loss_dict["stream25_opacity_raw"] = opacity_loss.detach()
     loss_dict["stream25_opacity_loss"] = weights["opacity"] * opacity_loss
     loss_dict["stream25_opacity_valid_count"] = pred_rgb.new_tensor(float(alpha.numel()))
+
+    # 内建 ball token 监督：球心 pos15 + 速度 v15（frame15, rig 系）。
+    # 仅在模型输出 ball_pos15 且数据集提供 ball_position_rig 时启用。
+    if "ball_pos15" in output and output["ball_pos15"] is not None and input_dict.get("ball_position_rig") is not None:
+        pos_pred = output["ball_pos15"]          # [b, 3]
+        vel_pred = output["ball_v15"]            # [b, 3]
+        pos_gt = input_dict["ball_position_rig"][:, -1]   # frame15 球心 -> [b, 3]
+        vel_gt = input_dict["ball_velocity_rig"][:, -1]
+        pos_gt = pos_gt.reshape(pos_pred.shape[0], -1)[:, :3].to(pos_pred.dtype).to(pos_pred.device)
+        vel_gt = vel_gt.reshape(vel_pred.shape[0], -1)[:, :3].to(vel_pred.dtype).to(vel_pred.device)
+        ball_pos_loss = F.smooth_l1_loss(pos_pred / 0.1, pos_gt / 0.1)   # 位置 scale 0.1m
+        ball_vel_loss = F.smooth_l1_loss(vel_pred / 1.0, vel_gt / 1.0)   # 速度 scale 1.0 m/s
+        loss_dict["stream25_ball_pos_raw"] = ball_pos_loss.detach()
+        loss_dict["stream25_ball_pos_loss"] = weights.get("ball_pos", 1.0) * ball_pos_loss
+        loss_dict["stream25_ball_vel_raw"] = ball_vel_loss.detach()
+        loss_dict["stream25_ball_vel_loss"] = weights.get("ball_vel", 1.0) * ball_vel_loss
 
     total = sum(v for k, v in loss_dict.items() if k.endswith("_loss") and k != "stream25_total_loss")
     loss_dict["stream25_total"] = total.detach()

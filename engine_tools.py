@@ -65,6 +65,8 @@ def build_model(args):
             enable_task_semantic_head=getattr(args, "enable_task_semantic_head", False),
             terminal_context_extrapolation=getattr(args, "terminal_context_extrapolation", False),
             terminal_dynamic_velocity_threshold=getattr(args, "terminal_dynamic_velocity_threshold", 1.0),
+            ms3_physics_override=getattr(args, "ms3_physics_override", False),
+            use_ball_token=getattr(args, "use_ball_token", False),
             render_target_chunk_size=getattr(
                 args, "stream25_render_target_chunk_size", 20
             ),

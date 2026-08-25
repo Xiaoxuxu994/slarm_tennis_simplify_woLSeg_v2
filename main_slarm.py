@@ -262,6 +262,11 @@ def get_args_parser():
     parser.add_argument("--stream25_ms3_ball_weight", type=float, default=1.00)
     parser.add_argument("--stream25_ms3_static_weight", type=float, default=0.25)
     parser.add_argument("--stream25_opacity_weight", type=float, default=0.10)
+    # 内建 ball token
+    parser.add_argument("--use_ball_token", action="store_true")
+    parser.add_argument("--ball_token_freeze_backbone", action="store_true")
+    parser.add_argument("--stream25_ball_pos_weight", type=float, default=1.0)
+    parser.add_argument("--stream25_ball_vel_weight", type=float, default=1.0)
     # MS3 physical normalization scales (spec 6.2) and the terminal dynamic split (spec 5.2).
     parser.add_argument("--stream25_ms3_velocity_scale", type=float, default=5.0)
     parser.add_argument("--stream25_ms3_acceleration_scale", type=float, default=9.81)
@@ -657,6 +662,19 @@ def main(args):
     logger.info(f"Dataset {args.dataset} contains {len(dataset_train):,} training sequences in total.")
 
     model = build_model(args)
+
+    # 两阶段训练可选：冻结 backbone，只训 ball token 相关参数。
+    # 必须在构建 optimizer 之前执行，否则冻结不生效。
+    if getattr(args, "ball_token_freeze_backbone", False):
+        _ball_prefixes = ("ball_query", "ball_block", "ball_head")
+        for _name, _p in model.named_parameters():
+            if not _name.startswith(_ball_prefixes):
+                _p.requires_grad = False
+        _n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        logger.info(
+            f"[ball_token_freeze_backbone] Only ball token params trainable: "
+            f"{_n_trainable / 1e6:.4f}M ({_n_trainable:,})"
+        )
 
     logger.info(f"Model = {str(model)}")
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)

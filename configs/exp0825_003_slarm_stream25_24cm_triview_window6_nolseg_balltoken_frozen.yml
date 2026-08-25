@@ -1,0 +1,92 @@
+# 24cm ball token 验证：冻结 exp004(exp0819_001, nolseg ckpt_039999) backbone，只训 ball token。
+# 目的：干净验证「ball token 直接回归球心 pos15+v15」能否比反投影的 pos15/frame24 更准。
+# 机制：load exp004 → backbone 加载、ball token 随机初始化(ckpt无此key，strict=False容忍)；
+#       冻结 backbone → 只 ball token 有梯度，几小时收敛。验证有效再上端到端/6.5cm。
+model: slarm
+dataset: [ball_catch_24cm_triview]
+data_root: data/SLARM_data
+
+input_size: [320, 240]
+patch_size: 8
+embed_dim: 768
+depth: 12
+patch_embed: conv
+num_max_cameras: 3
+num_context_timesteps: 6
+num_target_timesteps: 7
+context_stride: 3
+timespan: 0.8
+mode: window_6
+
+use_affine_token: true
+use_sky_token: true
+use_ms3_motion: true
+use_last_token: true
+shortcut_rgb: true
+add_patch_plucker_embed: true
+sigmoid_rgb: true
+num_motion_tokens: 0
+
+strict_data_loading: true
+enable_task_semantic_head: true
+terminal_context_extrapolation: true
+stream25_render_target_chunk_size: 7
+stream25_reconstruction_loss: true
+
+# ---- ball token（本实验主角）----
+use_ball_token: true
+ball_token_freeze_backbone: true        # 冻结 backbone，只训 ball token（先干净验证）
+stream25_ball_pos_weight: 1.0
+stream25_ball_vel_weight: 1.0
+
+# ---- 损失权重（冻结下 dense head 无梯度，这些不影响；保持 baseline）----
+stream25_rgb_weight: 1.00
+stream25_lpips_weight: 0.05
+stream25_ball_rgb_weight: 0.50
+stream25_depth_relative_weight: 1.00
+stream25_ball_depth_metric_weight: 0.02
+stream25_semantic_weight: 1.00
+stream25_ms3_ball_weight: 1.00
+stream25_ms3_static_weight: 0.25
+stream25_opacity_weight: 0.10
+
+stream25_ms3_velocity_scale: 5.0
+stream25_ms3_acceleration_scale: 9.81
+stream25_ms3_jerk_scale: 1.0
+terminal_dynamic_velocity_threshold: 1.0
+stream25_semantic_class_weight_cap: 10.0
+
+# ---- 无 LSeg ----
+online_feat: false
+enable_feat_loss: false
+feat_loss_coeff: 0.0
+stream25_lseg_feature_weight: 0.0
+enable_depth_loss: true
+enable_sky_opacity_loss: true
+enable_perceptual_loss: true
+perceptual_weight: 0.05
+perceptual_loss_start_iter: 0
+load_depth: true
+
+# ---- 优化（只训 ball token：新初始化 → 正常 LR + 短 warmup + 短训）----
+lr: 1.0e-4
+stream25_trunk_lr: 2e-5      # 冻结下 trunk 无梯度，此值无实际作用
+lr_sched: constant
+min_lr: 1.0e-6
+warmup_iters: 500
+batch_size: 1
+seed: 20260827
+
+# 从 exp004(exp0819_001) ckpt_039999 加载 backbone（冻结），只训新加的 ball token
+load_from: work_dirs/slarm/exp0819_001_slarm_stream25_24cm_triview_window6_uplr_nolseg/checkpoints/ckpt_039999.pth
+
+train_annotation: scene_list/ball_catch_24cm_triview_train.txt
+eval_annotation: scene_list/ball_catch_24cm_triview_validation.txt
+num_iterations: 10000        # 冻结只训 ball token，收敛快
+ckpt_every_n_iters: 1000
+vis_every_n_iters: 2000
+num_vis_samples: 1
+eval_every_n_iters: 50000
+keep_n_ckpts: 10
+project: slarm
+exp_name: exp0825_003_slarm_stream25_24cm_triview_window6_nolseg_balltoken_frozen

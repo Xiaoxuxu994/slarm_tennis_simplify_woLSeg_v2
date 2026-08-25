@@ -32,7 +32,7 @@ else:
     from gsplat.rendering import rasterization, rasterization_2dgs
 
 from .decoder import ConvDecoder, DummyDecoder, ModulatedLinearLayer
-from .layers import LayerNorm2d, Mlp
+from .layers import Block, LayerNorm2d, Mlp
 from .components.aggregator.aggregator import Aggregator
 from .components.heads.camera_head import CameraHead
 from .components.heads.dpt_head import DPTHead
@@ -155,6 +155,12 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
         sigmoid_ms3_min=0.0,
         sigmoid_ms3_max=100,  # 2.0
         ms3_clamp=0.0001,
+        # 物理先验硬固化开关（消融用）：开启后，动态高斯(球)的 a=canonical重力、j=0 并 detach，
+        # 网络不再学 a/j，只学 velocity；关闭(默认)时完全保持原行为。
+        ms3_physics_override=False,
+        # 内建 ball token（可选）：cross-attend frame15 terminal scene tokens，
+        # 预测球心 pos15(xyz, rig系)+ 速度 v15。默认关闭时完全不影响现有行为。
+        use_ball_token=False,
         # stream
         mode="full", #  default use full attention
         **kwargs,
@@ -237,6 +243,8 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
         self.num_motion_tokens = num_motion_tokens
         self.tau = tau
         self.use_ms3_motion = use_ms3_motion
+        self.ms3_physics_override = ms3_physics_override
+        self.use_ball_token = use_ball_token
         self.add_angular_velocity = add_angular_velocity
         if self.use_ms3_motion:
             self.ms3_deg = ms3_deg
@@ -407,6 +415,13 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
                     2 * embed_dim, self.decoder_upsample_ratio**2 * 4
                 )
                 self.unpatch_size = self.decoder_upsample_ratio
+
+            # 内建 ball token：可学习 query cross-attend frame15 terminal tokens，
+            # 输出 6 维（pos3 + vel3）。仅在开关开启时构建，默认零改变。
+            if self.use_ball_token:
+                self.ball_query = nn.Parameter(torch.randn(1, 1, 2 * embed_dim) * 0.02)
+                self.ball_block = Block(dim=2 * embed_dim, num_heads=16, use_cross_attn=True)
+                self.ball_head = Mlp(2 * embed_dim, 2 * embed_dim, 6)  # pos3 + vel3
         else:
             # gs head
             self.dense_feats_dim = 256  # 256 is dpt default feature dim
@@ -904,6 +919,42 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
         }
         return output_dict
 
+    def _apply_physics_ms3_override(self, forward_ms3, data_dict):
+        """物理先验硬固化（消融开关 ms3_physics_override）。
+
+        把「动态」高斯(球)的 MS3 acceleration 替换成 canonical 系重力、jerk 置零；静态高斯 a/j 置零。
+        两者都 detach —— 网络不再学 a/j，只学 velocity。判动静沿用速度阈值
+        terminal_dynamic_velocity_threshold（与 classify_terminal_dynamic 一致：‖v‖ >= 阈值 视为动态）。
+        重力取 rig 系 [0,0,-9.81]（= stream25.MS3_GRAVITY_RIG），按每个 context 帧的 canonical_to_rig
+        旋到 canonical 系（渲染器在 canonical 系驱动高斯位置，与 GT dense_ms3 同系）。
+
+        forward_ms3: [b, t, v, h, w, C]，前 ms3_deg*3 为平动 v/a/j，其后为 omega（若有）。
+        仅在 ms3_deg==3（含 jerk 通道）时适用。
+        """
+        assert self.ms3_deg == 3, "ms3_physics_override 目前假设 ms3_deg==3（v/a/j 各3通道）"
+        if "context_canonical_to_rig" not in data_dict:
+            raise KeyError(
+                "ms3_physics_override 需要 data_dict['context_canonical_to_rig'] 把重力旋到 canonical 系"
+            )
+        vel = forward_ms3[..., 0:3]
+        # 动静判据：速度模长 >= 阈值 视为动态(球)，与 classify_terminal_dynamic 保持一致
+        is_dynamic = vel.norm(dim=-1, keepdim=True) >= self.terminal_dynamic_velocity_threshold
+
+        # rig 系重力 → canonical 系（逐 context 帧的 4x4）
+        c2r = data_dict["context_canonical_to_rig"].to(forward_ms3.dtype)     # [b, t, 4, 4]
+        rig_to_canonical = c2r[..., :3, :3].transpose(-1, -2)                 # [b, t, 3, 3]
+        gravity_rig = forward_ms3.new_tensor([0.0, 0.0, -9.81])               # MS3_GRAVITY_RIG
+        gravity_canonical = torch.einsum("btij,j->bti", rig_to_canonical, gravity_rig)  # [b, t, 3]
+        gravity_canonical = gravity_canonical[:, :, None, None, None, :]      # [b,t,1,1,1,3] 广播到 v/h/w
+
+        accel = torch.where(is_dynamic, gravity_canonical, torch.zeros_like(vel)).detach()
+        jerk = torch.zeros_like(vel).detach()
+
+        parts = [vel, accel, jerk]                       # velocity 保留网络梯度
+        if forward_ms3.shape[-1] > self.ms3_deg * 3:
+            parts.append(forward_ms3[..., self.ms3_deg * 3:])  # omega 通道原样保留(带梯度)
+        return torch.cat(parts, dim=-1)
+
     def forward_renderer(self, gs_params, data_dict, feats=None, task_semantic=None, render_motion_seg=not is_ascend_npu(),
                          radius_clip=0.0, time_step=5, concat_feat_render=True, idx=None, static_render=False):
         if os.getenv("CONTEXT_FEAT"):
@@ -957,6 +1008,11 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
                 # new rotation = rotation + rotation_offset
                 quats_batched = quaternion_multiply(quats_batched, quats_offset_batched)
         else:
+            if self.ms3_physics_override:
+                # 源头覆盖：主驱动(下面)与 terminal 外推(forward_ms3_flat)都会取到 override 后的 a/j
+                gs_params["forward_ms3"] = self._apply_physics_ms3_override(
+                    gs_params["forward_ms3"], data_dict
+                )
             forward_ms3 = gs_params["forward_ms3"][..., :self.ms3_deg * 3]
             forward_ms3 = rearrange(forward_ms3, "b t v h w c -> b (t v h w) c")
             forward_ms3_batched = repeat(forward_ms3, "b ... -> (b t) ...", t=tgt_t)
@@ -1515,6 +1571,8 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
 
             pred_feat = None
             pred_task_semantic = None
+            ball_pos15 = None
+            ball_v15 = None
             if self.use_last_token:
                 # last layer's token
                 aggregated_last_tokens = last_tokens[:, :, self.patch_start_idx:]  # aggregated patch token
@@ -1538,6 +1596,17 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
 
                 if self.enable_task_semantic_head:
                     pred_task_semantic = self.forward_task_semantic_predictor(aggregated_last_tokens, shape=(h, w, t, v))
+
+                if self.use_ball_token:
+                    # aggregated_last_tokens: [b, (t v), p, c=2*embed_dim]
+                    _alt = rearrange(aggregated_last_tokens, "b (t v) p c -> b t v p c", t=t, v=v)
+                    # frame15 = 最后一个 context 帧的 terminal tokens：[b, v*p, c]
+                    _terminal = rearrange(_alt[:, -1], "b v p c -> b (v p) c")
+                    _bq = repeat(self.ball_query, "1 1 c -> b 1 c", b=b)
+                    _bf = self.ball_block(_bq, _terminal)  # cross-attn -> [b, 1, c]
+                    _bo = self.ball_head(_bf.squeeze(1))    # [b, 6]
+                    ball_pos15 = _bo[:, :3]
+                    ball_v15 = _bo[:, 3:6]
             else:
                 # Gaussian head (Dpt head)
                 gs_dense_feats = self.gs_feature_head(output_list, images=rearrange(images, '(b t v) c h w -> b (t v) c h w', b=b, t=t, v=v), patch_start_idx=self.patch_start_idx)
@@ -1602,6 +1671,10 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
         # save rendered pointcloud
         if not self.training and self.save_rendered_pc and stream_save:
             self.save_rendered_pointcloud(data_dict, output, save_path=self.rendered_pc_save_path)
+
+        if self.use_ball_token:
+            output["ball_pos15"] = ball_pos15
+            output["ball_v15"] = ball_v15
 
         output["aggregator_kv_cache_list"] = None
         output["camera_head_kv_cache_list"] = None
