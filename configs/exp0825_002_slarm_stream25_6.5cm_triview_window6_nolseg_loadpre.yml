@@ -1,0 +1,90 @@
+# 6.5cm 小球迁移续训（noLSeg）：基于 exp004(exp0819_001, nolseg ckpt_039999) 继续训。
+# 现象：exp004 在 6.5cm 上 zero-shot 完全崩(pos15 2.3m/崩66×，语义分不出小球)——RGB/depth 尺度正常，
+#       纯 domain shift(球从24cm直径缩到6.5cm，模型没见过)。macro dice 对类别不平衡免疫，
+#       只要在 6.5cm 上续训就会逼模型重新学会分小球；关键是大 LR(shift大) + 球深度监督。
+model: slarm
+dataset: [ball_catch_6.5cm_triview]        # ★ 6.5cm 数据（需已在 constants.py 注册，且数据 JSON 的 "dataset" 字段一致）
+data_root: data/SLARM_data
+
+input_size: [320, 240]
+patch_size: 8
+embed_dim: 768
+depth: 12
+patch_embed: conv
+num_max_cameras: 3
+num_context_timesteps: 6
+num_target_timesteps: 7
+context_stride: 3
+timespan: 0.8
+mode: window_6
+
+use_affine_token: true
+use_sky_token: true
+use_ms3_motion: true
+use_last_token: true
+shortcut_rgb: true
+add_patch_plucker_embed: true
+sigmoid_rgb: true
+num_motion_tokens: 0
+
+strict_data_loading: true
+enable_task_semantic_head: true
+terminal_context_extrapolation: true
+stream25_render_target_chunk_size: 7
+stream25_reconstruction_loss: true
+
+# ---- 损失权重（ball_depth 提到 0.5：小球深度更难 + 已知是 frame24 命门）----
+stream25_rgb_weight: 1.00
+stream25_lpips_weight: 0.05
+stream25_ball_rgb_weight: 0.50
+stream25_depth_relative_weight: 1.00
+stream25_ball_depth_metric_weight: 0.5   # ★ 0.02 → 0.5（小球深度）
+stream25_semantic_weight: 1.00           # 语义是分出小球的关键；macro dice 已对不平衡免疫
+stream25_ms3_ball_weight: 1.00
+stream25_ms3_static_weight: 0.25
+stream25_opacity_weight: 0.10
+
+stream25_ms3_velocity_scale: 5.0
+stream25_ms3_acceleration_scale: 9.81
+stream25_ms3_jerk_scale: 1.0
+terminal_dynamic_velocity_threshold: 1.0
+stream25_semantic_class_weight_cap: 10.0
+# 可选：想给小球 ce 额外加权可取消下一行注释（顺序 background/ball/floor/obstacle，球=index1）。
+# macro dice 已兜底，非必需；数据量小/球极少时再考虑。
+# stream25_semantic_class_weights: [1.3, 10.0, 1.8, 3.7]
+
+# ---- 无 LSeg（与 exp0819_001 一致）----
+online_feat: false
+enable_feat_loss: false
+feat_loss_coeff: 0.0
+stream25_lseg_feature_weight: 0.0
+enable_depth_loss: true
+enable_sky_opacity_loss: true
+enable_perceptual_loss: true
+perceptual_weight: 0.05
+perceptual_loss_start_iter: 0
+load_depth: true
+
+# ---- 优化（大 LR 迁移：domain shift 大，接近从头训的 LR，别用同分布微调的小 LR）----
+lr: 1.0e-4               # 大 shift → 大 LR（要重学小球尺度/深度）
+stream25_trunk_lr: 2e-5
+lr_sched: constant
+min_lr: 1.0e-6
+warmup_iters: 1000       # 大 shift 要够 warmup
+batch_size: 1
+seed: 20260826
+
+# ★ 从 exp004(exp0819_001) ckpt_039999 继续训（复用 ball_catch backbone；尺度靠续训重学）
+load_from: work_dirs/slarm/exp0819_001_slarm_stream25_24cm_triview_window6_uplr_nolseg/checkpoints/ckpt_039999.pth
+
+# ★ 确认这两个 scene_list 名与你 6.5cm 数据实际文件一致（否则会报“找不到文件”）
+train_annotation: scene_list/ball_catch_6.5cm_triview_train.txt
+eval_annotation: scene_list/ball_catch_6.5cm_triview_validation.txt
+num_iterations: 40000        # 与从头训同量（domain shift 大，给足充分学小球）
+ckpt_every_n_iters: 2000     # 40k/2k=20 个存档，便于按 eval 挑最优
+vis_every_n_iters: 5000
+num_vis_samples: 1
+eval_every_n_iters: 50000
+keep_n_ckpts: 20
+project: slarm
+exp_name: exp0825_002_slarm_stream25_6.5cm_triview_window6_nolseg_loadpre
