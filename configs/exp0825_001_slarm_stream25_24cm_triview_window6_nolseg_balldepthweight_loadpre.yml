@@ -1,0 +1,85 @@
+# 微调实验：基于 exp0819_001(nolseg, ckpt_039999) 继续训，只加大「球绝对深度」监督权重。
+# 目的：验证 ball_depth_metric 权重 0.02→0.5 能否把 pos15 的 along(球深度沿视线偏移)从 ~8.9cm 压下来，
+#       即「直接的 ball_depth 监督能否替代 LSeg 压深度」。小 LR + 短训，只轻推深度、不破坏已学好的 rgb/语义/几何。
+model: slarm
+dataset: [ball_catch_24cm_triview]
+data_root: data/SLARM_data
+
+input_size: [320, 240]
+patch_size: 8
+embed_dim: 768
+depth: 12
+patch_embed: conv
+num_max_cameras: 3
+num_context_timesteps: 6
+num_target_timesteps: 7
+context_stride: 3
+timespan: 0.8
+mode: window_6
+
+use_affine_token: true
+use_sky_token: true
+use_ms3_motion: true
+use_last_token: true
+shortcut_rgb: true
+add_patch_plucker_embed: true
+sigmoid_rgb: true
+num_motion_tokens: 0
+
+strict_data_loading: true
+enable_task_semantic_head: true
+terminal_context_extrapolation: true
+stream25_render_target_chunk_size: 7
+stream25_reconstruction_loss: true
+
+# ---- 损失权重（唯一改动：ball_depth_metric 0.02 → 0.5，加强球绝对深度监督）----
+stream25_rgb_weight: 1.00
+stream25_lpips_weight: 0.05
+stream25_ball_rgb_weight: 0.50
+stream25_depth_relative_weight: 1.00
+stream25_ball_depth_metric_weight: 0.5   # ★ 命门：从 0.02 提到 0.5（25×）；对症 along
+stream25_semantic_weight: 1.00
+stream25_ms3_ball_weight: 1.00
+stream25_ms3_static_weight: 0.25
+stream25_opacity_weight: 0.10
+
+stream25_ms3_velocity_scale: 5.0
+stream25_ms3_acceleration_scale: 9.81
+stream25_ms3_jerk_scale: 1.0
+terminal_dynamic_velocity_threshold: 1.0
+stream25_semantic_class_weight_cap: 10.0
+
+# ---- 无 LSeg（与 exp0819_001 一致）----
+online_feat: false
+enable_feat_loss: false
+feat_loss_coeff: 0.0
+stream25_lseg_feature_weight: 0.0
+enable_depth_loss: true
+enable_sky_opacity_loss: true
+enable_perceptual_loss: true
+perceptual_weight: 0.05
+perceptual_loss_start_iter: 0
+load_depth: true
+
+# ---- 优化（微调：小 LR + 短 warmup + 短训，保护已收敛的重建，只轻推深度）----
+lr: 2.0e-5              # 原从头 1e-4 的 1/5；微调用小 LR，depth 权重 0.5 负责驱动深度学习
+stream25_trunk_lr: 4e-6 # 原 2e-5 的 1/5；trunk 更小，别冲乱 backbone
+lr_sched: constant
+min_lr: 1.0e-6
+warmup_iters: 200       # 已收敛，只需短 warmup 保护 Adam 重启
+batch_size: 1
+seed: 20260825
+
+# ★ 从 exp0819_001 的 ckpt_039999 继续训（微调，不是从 waymo init）
+load_from: work_dirs/slarm/exp0819_001_slarm_stream25_24cm_triview_window6_uplr_nolseg/checkpoints/ckpt_039999.pth
+
+train_annotation: scene_list/ball_catch_24cm_triview_train.txt
+eval_annotation: scene_list/ball_catch_24cm_triview_validation.txt
+num_iterations: 8000        # 微调短训，看趋势即可（约 exp0819 的 1/5）
+ckpt_every_n_iters: 500     # 8000/500=16 个存档，密一点便于按 eval 挑最优
+vis_every_n_iters: 1000
+num_vis_samples: 1
+eval_every_n_iters: 50000
+keep_n_ckpts: 16
+project: slarm
+exp_name: exp0825_001_slarm_stream25_24cm_triview_window6_nolseg_balldepthweight_loadpre
