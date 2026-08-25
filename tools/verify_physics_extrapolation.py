@@ -111,6 +111,20 @@ def _scene_error(per_eye, gt_pos24, dt, gravity, strategy):
     return max(errs) if errs else float("nan")
 
 
+def _pos15_error(per_eye, gt_pos15):
+    """pos15 起点误差 = ‖pred_pos15 − gt_pos15‖（选球 + depth 反投影的合成误差）。
+
+    这是 frame24 的「地板」：无论外推公式多准，起点错了 frame24 至少错这么多（系数=1）。
+    conservative 口径：取各视图有效误差里的最大值。gt_pos15 为 frame15 球真值位置(rig 系)。"""
+    errs = []
+    for state in per_eye:
+        if state is None:
+            continue
+        pos = state[0]
+        errs.append(float((pos - gt_pos15).norm().item()))
+    return max(errs) if errs else float("nan")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
@@ -135,18 +149,21 @@ def main():
     n = len(dataset) if args_cli.limit <= 0 else min(args_cli.limit, len(dataset))
     print(f"[verify] {args_cli.split}: {n}/{len(dataset)} scenes | gravity(rig)={gravity.tolist()}", flush=True)
 
-    per_scene = []          # 每个场景：(per_eye_states, gt_pos24, dt)
+    per_scene = []          # 每个场景：(per_eye_states, gt_pos24, gt_pos15, dt)
     gt_accel_samples = []   # GT 球加速度(rig) 采样，用于核对重力
 
     for index in range(n):
         t0 = time.time()
         input_dict, target_dict = collate_and_prepare(dataset[index], args, device)
+        t_load = time.time()
         prepared = dict(input_dict)
         prepared.update(target_dict)
 
         scene = _run_scene(model, prepared, device, dtype)
+        t_fwd = time.time()
         canonical_to_rig = prepared["context_canonical_to_rig"][0, -1].float().cpu()
         gt_pos24 = prepared["ball_position_rig"][0, 24].float().cpu()
+        gt_pos15 = prepared["ball_position_rig"][0, 15].float().cpu()
         dt = float(
             (prepared["target_time"][0, 24, 0] - prepared["context_time"][0, -1, 0]).item()
             * args.timespan
@@ -161,7 +178,7 @@ def main():
             src: _extract_ball_state(scene, canonical_to_rig, region)
             for src, region in regions.items()
         }
-        per_scene.append((scene_states, gt_pos24, dt))
+        per_scene.append((scene_states, gt_pos24, gt_pos15, dt))
 
         # 核对重力：从 GT dense_ms3 的球区域取加速度(rig)（防御式，失败就跳过）
         try:
@@ -176,21 +193,38 @@ def main():
             pass
 
         del input_dict, target_dict, prepared, scene
-        print(f"  scene {index + 1}/{n}  ({time.time() - t0:.1f}s)", flush=True)
+        print(
+            f"  scene {index + 1}/{n}  load={t_load - t0:.1f}s "
+            f"fwd+render={t_fwd - t_load:.1f}s extract={time.time() - t_fwd:.1f}s",
+            flush=True,
+        )
 
     if gt_accel_samples:
         g_mean = torch.stack(gt_accel_samples).mean(dim=0)
         print(f"\n[核对] GT 球加速度(rig) 均值 = {g_mean.tolist()}  （应≈重力；据此核对 --gravity）")
 
     sources = [s for s in ("pred", "gt") if per_scene and s in per_scene[0][0]]
+
+    # ① pos15 起点误差（frame24 的"地板"：外推再准也超不过它）
     print("\n" + "=" * 72)
+    print(f"{'球区域':8s} {'指标':16s} {'median':>10s} {'p95':>10s} {'有效场景':>8s}")
+    print("-" * 72)
+    for src in sources:
+        errs = [_pos15_error(states[src], gp15) for (states, _g24, gp15, _dt) in per_scene]
+        finite = [e for e in errs if e == e]
+        med = finite_percentile(finite, 50) if finite else float("nan")
+        p95 = finite_percentile(finite, 95) if finite else float("nan")
+        print(f"{src:8s} {'pos15 起点误差':16s} {med:10.4f} {p95:10.4f} {len(finite):8d}")
+    print("=" * 72)
+
+    # ② frame24 落点误差（三种外推 × 球区域来源）
     print(f"{'球区域':8s} {'外推':12s} {'median':>10s} {'p95':>10s} {'有效场景':>8s}")
     print("-" * 72)
     for src in sources:
         for strat, name in [("free", "free(现状)"), ("phys", "phys(物理)"), ("linear", "linear")]:
             errs = [
-                _scene_error(states[src], gt, dt, gravity, strat)
-                for (states, gt, dt) in per_scene
+                _scene_error(states[src], g24, dt, gravity, strat)
+                for (states, g24, _gp15, dt) in per_scene
             ]
             finite = [e for e in errs if e == e]  # 去 nan
             med = finite_percentile(finite, 50) if finite else float("nan")
@@ -198,9 +232,10 @@ def main():
             print(f"{src:8s} {name:12s} {med:10.4f} {p95:10.4f} {len(finite):8d}")
     print("=" * 72)
     print("解读：")
-    print("  pred×phys 比 pred×free 低很多 → 外推公式是元凶（上物理外推）")
-    print("  gt×free   比 pred×free 低很多 → 语义选球是瓶颈（ball token 直接回归位置最值）")
-    print("  gt×phys   是上界（只剩 depth 反投影误差）")
+    print("  pos15 起点误差 = frame24 的地板；pred 与 gt 的差 = 选球错的代价")
+    print("  pred×phys ≈ pred×free → 外推(a/j)不是瓶颈")
+    print("  gt×* 比 pred×* 低很多 → 选球(语义)是瓶颈 → ball token 直接回归位置最值")
+    print("  frame24 减去 pos15 的剩余 → v15(速度)与外推的贡献")
 
 
 if __name__ == "__main__":
