@@ -148,6 +148,19 @@ def _pos15_decompose(per_eye, gt_pos15):
     return (best[1], best[2]) if best is not None else None
 
 
+def _v15_error(per_eye, gt_v15):
+    """v15 球速度误差 = ‖pred_v15 − gt_v15‖(rig)。pred_v15 = 该 source 球区域 MS3 velocity 的
+    median；gt_v15 = GT dense_ms3 球区域 velocity median。conservative 取各视图最大。"""
+    if gt_v15 is None:
+        return float("nan")
+    errs = []
+    for state in per_eye:
+        if state is None:
+            continue
+        errs.append(float((state[1] - gt_v15).norm().item()))
+    return max(errs) if errs else float("nan")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
@@ -172,7 +185,7 @@ def main():
     n = len(dataset) if args_cli.limit <= 0 else min(args_cli.limit, len(dataset))
     print(f"[verify] {args_cli.split}: {n}/{len(dataset)} scenes | gravity(rig)={gravity.tolist()}", flush=True)
 
-    per_scene = []          # 每个场景：(per_eye_states, gt_pos24, gt_pos15, dt)
+    per_scene = []          # 每个场景：(per_eye_states, gt_pos24, gt_pos15, gt_v15, dt)
     gt_accel_samples = []   # GT 球加速度(rig) 采样，用于核对重力
 
     for index in range(n):
@@ -201,19 +214,25 @@ def main():
             src: _extract_ball_state(scene, canonical_to_rig, region)
             for src, region in regions.items()
         }
-        per_scene.append((scene_states, gt_pos24, gt_pos15, dt))
-
-        # 核对重力：从 GT dense_ms3 的球区域取加速度(rig)（防御式，失败就跳过）
+        # GT 球速度/加速度(rig)：从 GT dense_ms3 球区域 median 取；速度→v15 误差，加速度→核对重力
+        gt_v15 = None
         try:
             gt_ms3_15 = prepared["dense_ms3_gt"][0].float().cpu()[15]        # [V,H,W,9]
             ball_mask_15 = prepared["ball_ms3_mask"][0].bool().cpu()[15]     # [V,H,W]
+            v_samples = []
             for eye in range(gt_ms3_15.shape[0]):
                 m = ball_mask_15[eye]
                 if m.any():
                     a_gt = gt_ms3_15[eye, ..., 3:6][m].median(dim=0).values
                     gt_accel_samples.append(transform_vector(a_gt, canonical_to_rig))
+                    v_gt = gt_ms3_15[eye, ..., 0:3][m].median(dim=0).values
+                    v_samples.append(transform_vector(v_gt, canonical_to_rig))
+            if v_samples:
+                gt_v15 = torch.stack(v_samples).mean(dim=0)
         except Exception:
             pass
+
+        per_scene.append((scene_states, gt_pos24, gt_pos15, gt_v15, dt))
 
         del input_dict, target_dict, prepared, scene
         print(
@@ -233,7 +252,7 @@ def main():
     print(f"{'region':8s} {'metric':16s} {'median':>10s} {'p95':>10s} {'n_valid':>8s}")
     print("-" * 72)
     for src in sources:
-        errs = [_pos15_error(states[src], gp15) for (states, _g24, gp15, _dt) in per_scene]
+        errs = [_pos15_error(states[src], gp15) for (states, _g24, gp15, _gv, _dt) in per_scene]
         finite = [e for e in errs if e == e]
         med = finite_percentile(finite, 50) if finite else float("nan")
         p95 = finite_percentile(finite, 95) if finite else float("nan")
@@ -244,7 +263,7 @@ def main():
     print(f"{'region':8s} {'pos15_split':14s} {'along_med':>10s} {'along_p95':>10s} {'lat_med':>10s} {'lat_p95':>10s}")
     print("-" * 72)
     for src in sources:
-        decs = [_pos15_decompose(states[src], gp15) for (states, _g24, gp15, _dt) in per_scene]
+        decs = [_pos15_decompose(states[src], gp15) for (states, _g24, gp15, _gv, _dt) in per_scene]
         decs = [d for d in decs if d is not None]
         along = [d[0] for d in decs]
         lateral = [d[1] for d in decs]
@@ -255,6 +274,17 @@ def main():
         print(f"{src:8s} {'along/lateral':14s} {am:10.4f} {ap:10.4f} {lm:10.4f} {lp:10.4f}")
     print("=" * 72)
 
+    # ①c v15 球速度误差（外推部分 frame24 − pos15 的主要来源）
+    print(f"{'region':8s} {'metric':16s} {'median':>10s} {'p95':>10s} {'n_valid':>8s}")
+    print("-" * 72)
+    for src in sources:
+        errs = [_v15_error(states[src], gv) for (states, _g24, _gp15, gv, _dt) in per_scene]
+        finite = [e for e in errs if e == e]
+        med = finite_percentile(finite, 50) if finite else float("nan")
+        p95 = finite_percentile(finite, 95) if finite else float("nan")
+        print(f"{src:8s} {'v15_error':16s} {med:10.4f} {p95:10.4f} {len(finite):8d}")
+    print("=" * 72)
+
     # ② frame24 落点误差（三种外推 × 球区域来源）
     print(f"{'region':8s} {'extrap':12s} {'median':>10s} {'p95':>10s} {'n_valid':>8s}")
     print("-" * 72)
@@ -262,7 +292,7 @@ def main():
         for strat, name in [("free", "free(current)"), ("phys", "phys(gravity)"), ("linear", "linear")]:
             errs = [
                 _scene_error(states[src], g24, dt, gravity, strat)
-                for (states, g24, _gp15, dt) in per_scene
+                for (states, g24, _gp15, _gv, dt) in per_scene
             ]
             finite = [e for e in errs if e == e]  # 去 nan
             med = finite_percentile(finite, 50) if finite else float("nan")
@@ -275,6 +305,7 @@ def main():
     print("  pred x phys ~= pred x free  -> extrapolation (a/j) is NOT the bottleneck")
     print("  gt x * << pred x *  -> ball selection is the bottleneck -> ball token")
     print("  frame24 minus pos15  -> contribution of v15 (velocity) + extrapolation")
+    print("  v15_error x dt(~0.3)  ~= that extrapolation contribution")
 
 
 if __name__ == "__main__":
