@@ -90,7 +90,10 @@ def _extract_ball_state(scene, canonical_to_rig, region_mask):
             transform_vector(ms3_15[eye, ..., o:o + 3][mask].median(dim=0).values, canonical_to_rig)
             for o in (0, 3, 6)
         )
-        per_eye.append((pos, v, a, j))
+        # 球区域视线方向(rig 系,归一化)：depth 误差沿此方向 → 用于把 pos15 误差拆成 沿视线/横向
+        view_dir = transform_vector(scene["ray_d15"][eye][mask].median(dim=0).values, canonical_to_rig)
+        view_dir = view_dir / (view_dir.norm() + 1e-8)
+        per_eye.append((pos, v, a, j, view_dir))
     return per_eye
 
 
@@ -100,7 +103,7 @@ def _scene_error(per_eye, gt_pos24, dt, gravity, strategy):
     for state in per_eye:
         if state is None:
             continue
-        pos, v, a, j = state
+        pos, v, a, j = state[:4]
         if strategy == "free":
             pred = pos + v * dt + 0.5 * a * dt ** 2 + (1.0 / 6.0) * j * dt ** 3
         elif strategy == "phys":
@@ -123,6 +126,26 @@ def _pos15_error(per_eye, gt_pos15):
         pos = state[0]
         errs.append(float((pos - gt_pos15).norm().item()))
     return max(errs) if errs else float("nan")
+
+
+def _pos15_decompose(per_eye, gt_pos15):
+    """把 pos15 误差向量拆成 沿视线(depth 期望值误差) 与 横向(球定位误差) 两分量。
+
+    depth 误差沿视线方向传播（pos = ray_o + ray_d·depth）；横向误差来自球在图像上的
+    median 位置/选球偏移。conservative：取总误差最大的那个视图。返回 (along, lateral) 或 None。"""
+    best = None
+    for state in per_eye:
+        if state is None:
+            continue
+        pos, view_dir = state[0], state[4]
+        err = pos - gt_pos15
+        proj = err.dot(view_dir)
+        along = float(proj.abs().item())
+        lateral = float((err - proj * view_dir).norm().item())
+        total = float(err.norm().item())
+        if best is None or total > best[0]:
+            best = (total, along, lateral)
+    return (best[1], best[2]) if best is not None else None
 
 
 def main():
@@ -215,6 +238,21 @@ def main():
         med = finite_percentile(finite, 50) if finite else float("nan")
         p95 = finite_percentile(finite, 95) if finite else float("nan")
         print(f"{src:8s} {'pos15 起点误差':16s} {med:10.4f} {p95:10.4f} {len(finite):8d}")
+    print("=" * 72)
+
+    # ①b pos15 误差分解：沿视线(depth 期望值误差) vs 横向(球定位误差)
+    print(f"{'球区域':8s} {'pos15 分解':14s} {'沿视线med':>10s} {'沿视线p95':>10s} {'横向med':>10s} {'横向p95':>10s}")
+    print("-" * 72)
+    for src in sources:
+        decs = [_pos15_decompose(states[src], gp15) for (states, _g24, gp15, _dt) in per_scene]
+        decs = [d for d in decs if d is not None]
+        along = [d[0] for d in decs]
+        lateral = [d[1] for d in decs]
+        am = finite_percentile(along, 50) if along else float("nan")
+        ap = finite_percentile(along, 95) if along else float("nan")
+        lm = finite_percentile(lateral, 50) if lateral else float("nan")
+        lp = finite_percentile(lateral, 95) if lateral else float("nan")
+        print(f"{src:8s} {'沿视线/横向':14s} {am:10.4f} {ap:10.4f} {lm:10.4f} {lp:10.4f}")
     print("=" * 72)
 
     # ② frame24 落点误差（三种外推 × 球区域来源）
