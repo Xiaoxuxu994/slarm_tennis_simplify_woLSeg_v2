@@ -19,6 +19,7 @@ DATASETS = {
     "b2d": {"opencv2dataset": np.eye(4), "canonical_to_flu": opencv2waymo},
     "ball_catch_24cm_stereo40_stream25_nopitch": {"opencv2dataset": opencv2waymo, "canonical_to_flu": np.eye(4)},
     "ball_catch_24cm_triview": {"opencv2dataset": opencv2waymo, "canonical_to_flu": np.eye(4)},
+    "ball_catch_6.5cm_triview": {"opencv2dataset": opencv2waymo, "canonical_to_flu": np.eye(4)},
 }
 
 waymo_train = "scene_list/waymo_train.txt"  # NOTE: Use full data for multi-GPU
@@ -167,6 +168,20 @@ DATASET_DICT = {
         "num_target_timesteps": 7,
         "annotation_txt_file_train": "scene_list/ball_catch_24cm_triview_train.txt",
         "annotation_txt_file_val": "scene_list/ball_catch_24cm_triview_validation.txt",
+        "camera_list": {
+            2: ["front_left", "front_right"],
+            3: ["front_left", "front_right", "lower_front"],
+        },
+        "ref_camera": "front_left",
+    },
+
+    "ball_catch_6.5cm_triview": {
+        "size": [320, 240],
+        "temporal": True,
+        "num_context_timesteps": 6,
+        "num_target_timesteps": 7,
+        "annotation_txt_file_train": "scene_list/ball_catch_6.5cm_triview_train.txt",
+        "annotation_txt_file_val": "scene_list/ball_catch_6.5cm_triview_validation.txt",
         "camera_list": {
             2: ["front_left", "front_right"],
             3: ["front_left", "front_right", "lower_front"],
