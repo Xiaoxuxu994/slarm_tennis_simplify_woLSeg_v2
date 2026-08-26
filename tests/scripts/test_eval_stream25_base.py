@@ -318,7 +318,7 @@ class TestFinalTestSentinel:
         sentinel_path = os.path.join(sentinel_dir, f"{hash_val}.json")
         with open(sentinel_path, "w") as f:
             json.dump({"started": True}, f)
-        from tools.eval_stream25_base import check_final_test_sentinel
+        from scripts.eval_stream25_base import check_final_test_sentinel
         with pytest.raises((RuntimeError, FileExistsError)):
             check_final_test_sentinel(sentinel_dir, hash_val)
 
@@ -327,6 +327,6 @@ class TestFinalTestSentinel:
         sentinel_dir = str(tmp_path / "sentinel")
         os.makedirs(sentinel_dir, exist_ok=True)
         hash_val = "new123"
-        from tools.eval_stream25_base import check_final_test_sentinel
+        from scripts.eval_stream25_base import check_final_test_sentinel
         check_final_test_sentinel(sentinel_dir, hash_val)
         assert os.path.isfile(os.path.join(sentinel_dir, f"{hash_val}.json"))
