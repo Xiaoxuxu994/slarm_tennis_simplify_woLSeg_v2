@@ -6,7 +6,7 @@ import math
 import pytest
 import torch
 
-from tools.eval_stream25_base import (
+from scripts.eval_stream25_base import (
     CAMERA_ORDER,
     apply_acceptance_gates,
     apply_scoped_acceptance_gates,

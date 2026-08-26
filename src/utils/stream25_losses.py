@@ -421,6 +421,20 @@ def compute_stream25_loss(
         loss_dict["stream25_ball_vel_raw"] = ball_vel_loss.detach()
         loss_dict["stream25_ball_vel_loss"] = weights.get("ball_vel", 1.0) * ball_vel_loss
 
+        # 米制诊断量：直接读米 / (m/s)，省去从 smooth_l1 反推（loss 既除过 scale，
+        # 又是三个坐标分量的 mean，不是 L2 范数，无法一眼换算）。
+        # 与 eval 的 ball_pos15_error / ball_vel15_error 同口径 —— 都是 ‖pred − gt‖₂。
+        # 三点约束：① detach，不进 backward；② 键名不含 "loss" 子串，才不会被
+        # main_slarm.py 的 sum(loss for k in loss_dict if "loss" in k) 计进总损失；
+        # ③ 与 ball loss 同生共死，键集合只取决于全局 config，不随 batch 内容变化，
+        #    否则 DDP 下逐键 all_reduce 会因各 rank 键集合不一致而卡死。
+        loss_dict["stream25_ball_pos_l2_m"] = (
+            (pos_pred.float() - pos_gt.float()).norm(dim=-1).mean().detach()
+        )
+        loss_dict["stream25_ball_vel_l2_ms"] = (
+            (vel_pred.float() - vel_gt.float()).norm(dim=-1).mean().detach()
+        )
+
     total = sum(v for k, v in loss_dict.items() if k.endswith("_loss") and k != "stream25_total_loss")
     loss_dict["stream25_total"] = total.detach()
     return loss_dict

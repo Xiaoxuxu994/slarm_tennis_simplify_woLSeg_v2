@@ -39,7 +39,8 @@ class StreamSession:
         self.predictions = dict()
         named_keys = ['gs_params', 'pred_feat', 'sky_token','affine_tokens', 'pred_context_depth',
                   'pred_context_camera_enc_list','pred_context_depth_conf', 'pred_context_pts3d',
-                  'pred_context_pts3d_conf', 'pred_task_semantic']
+                  'pred_context_pts3d_conf', 'pred_task_semantic',
+                  'ball_pos15', 'ball_v15']
         for k in named_keys:
             self.predictions[k] = None
 
@@ -47,7 +48,7 @@ class StreamSession:
         for k in ['gs_params', 'pred_feat', 'sky_token','affine_tokens', 'pred_context_depth',
                   'pred_context_camera_enc_list','pred_context_depth_conf', 'pred_context_pts3d',
                   'pred_context_pts3d_conf', 'latest_perception_tokens',
-                  'pred_task_semantic']:
+                  'pred_task_semantic', 'ball_pos15', 'ball_v15']:
 
             if k not in predictions:
                 continue
@@ -107,6 +108,12 @@ class StreamSession:
 
             if k == 'sky_token' or k == 'affine_tokens':
                 self.predictions[k] = pred_value # TODO: now use last token
+                continue
+
+            if k in ('ball_pos15', 'ball_v15'):
+                # ball token 输出 [b, 3]，没有时间轴，不能沿 dim=1 拼接。
+                # 每次 forward 覆盖，流完 window 后留下的就是最后一次观测(frame15)的球状态。
+                self.predictions[k] = pred_value
                 continue
 
             if k == 'pred_context_camera_enc_list':

@@ -176,6 +176,22 @@ def integrate_frame24_position(
     return pos15 + v15 * dt + 0.5 * a15 * dt ** 2 + (1.0 / 6.0) * j15 * dt ** 3
 
 
+def integrate_frame24_position_physics(
+    pos15: torch.Tensor,
+    v15: torch.Tensor,
+    dt: float,
+    gravity_rig: torch.Tensor,
+) -> torch.Tensor:
+    """Integrate frame-15 ball state to frame 24 under known gravity (a=g, j=0).
+
+    Companion to :func:`integrate_frame24_position` for the ball-token path: the
+    network only supplies ``pos15``/``v15`` and the physical prior supplies the
+    second order term, so nothing free-form is amplified by ``dt**2``/``dt**3``.
+    All three arguments live in the scene-fixed rig frame.
+    """
+    return pos15 + v15 * dt + 0.5 * gravity_rig * dt ** 2
+
+
 def transform_position(position: torch.Tensor, transform: torch.Tensor) -> torch.Tensor:
     """Apply a homogeneous rigid transform to one or more 3-D positions."""
     if position.shape[-1] != 3 or transform.shape[-2:] != (4, 4):

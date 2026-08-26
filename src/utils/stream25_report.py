@@ -8,6 +8,8 @@ metrics 结构约定（= evaluation.json 的顶层 "metrics"，即 aggregate sco
   metrics["ball_depth_error_median"][<bucket>], metrics["ball_depth_error_p95"][<bucket>]
   metrics["ms3_ball_velocity"]["median"/"p95"]（accel/jerk/static/context 同理）
   metrics["frame24_position"]["median"/"p95"]
+  metrics["frame24_position_balltoken"/"ball_pos15_error"/"ball_vel15_error"]["median"/"p95"]
+      —— 仅当模型带内建 ball token (use_ball_token) 时存在；缺席时表格显示 n/a
 bucket ∈ {anchor, interpolation, near, mid, far, farthest}
 """
 from __future__ import annotations
@@ -20,6 +22,10 @@ from typing import Any, Dict, List, Optional, Tuple
 #   threshold_key: ACCEPTANCE_TABLE 里的键；None 表示不设门
 KEY_METRICS: List[Tuple[str, str, List[Tuple[str, str]], Optional[str]]] = [
     ("frame24 position med / p95",    "down", [("frame24_position", "median"), ("frame24_position", "p95")], "frame24_position"),
+    # 内建 ball token 的并列口径（无 ball token 的模型这三行显示 n/a；不参与 acceptance gate）
+    ("frame24 balltoken med / p95",   "down", [("frame24_position_balltoken", "median"), ("frame24_position_balltoken", "p95")], None),
+    ("balltoken pos15 med / p95",     "down", [("ball_pos15_error", "median"), ("ball_pos15_error", "p95")], None),
+    ("balltoken vel15 med / p95",     "down", [("ball_vel15_error", "median"), ("ball_vel15_error", "p95")], None),
     ("ball velocity med / p95",       "down", [("ms3_ball_velocity", "median"), ("ms3_ball_velocity", "p95")], "ms3_ball_velocity"),
     ("ball acceleration med / p95",   "down", [("ms3_ball_acceleration", "median"), ("ms3_ball_acceleration", "p95")], "ms3_ball_acceleration"),
     ("ball jerk med / p95",           "down", [("ms3_ball_jerk", "median"), ("ms3_ball_jerk", "p95")], "ms3_ball_jerk"),

@@ -59,12 +59,18 @@ def _run_scene(model, prepared, device, dtype):
             image_size=prepared["target_image"].shape[-2:],
         )
     render = predictions["render_results"]
+    # 内建 ball token（config 未开时这两个键不存在 / 为 None）。已经是 rig 系，不需要
+    # canonical_to_rig —— 它由 ball_position_rig 直接监督，和像素法那条路不同系。
+    ball_pos15 = predictions.get("ball_pos15")
+    ball_v15 = predictions.get("ball_v15")
     return {
         "depth15": render["rendered_depth"][0].float().cpu()[15],           # [V,H,W]
         "sem15": render["rendered_task_semantic"][0].long().cpu()[15],       # [V,H,W]
         "ms3_15": render["rendered_target_ms3"][0].float().cpu()[15],        # [V,H,W,9]
         "ray_o15": rays["origins"][0, 15].float().cpu(),                     # [V,H,W,3]
         "ray_d15": rays["dirs"][0, 15].float().cpu(),                        # [V,H,W,3]
+        "ball_pos15": None if ball_pos15 is None else ball_pos15.reshape(-1)[:3].float().cpu(),
+        "ball_v15": None if ball_v15 is None else ball_v15.reshape(-1)[:3].float().cpu(),
     }
 
 
@@ -161,6 +167,26 @@ def _v15_error(per_eye, gt_v15):
     return max(errs) if errs else float("nan")
 
 
+def _balltoken_errors(ball_state, gt_pos24, gt_pos15, gt_v15, dt, gravity):
+    """ball token 一路：直接回归的 pos15/v15 + 已知重力外推到 frame24。
+
+    与像素法的关键区别：不选球像素、不反投影 depth、不取 median，也不用
+    canonical_to_rig —— ball token 由 ball_position_rig 直接监督，输出就在 rig 系。
+    返回 (frame24_err, pos15_err, v15_err)，任一不可得则为 nan。"""
+    nan = float("nan")
+    if ball_state is None:
+        return (nan, nan, nan)
+    pos15, v15 = ball_state
+    if pos15 is None or v15 is None:
+        return (nan, nan, nan)
+    pred24 = pos15 + v15 * dt + 0.5 * gravity * dt ** 2
+    return (
+        float((pred24 - gt_pos24).norm().item()),
+        float((pos15 - gt_pos15).norm().item()),
+        nan if gt_v15 is None else float((v15 - gt_v15).norm().item()),
+    )
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
@@ -185,7 +211,7 @@ def main():
     n = len(dataset) if args_cli.limit <= 0 else min(args_cli.limit, len(dataset))
     print(f"[verify] {args_cli.split}: {n}/{len(dataset)} scenes | gravity(rig)={gravity.tolist()}", flush=True)
 
-    per_scene = []          # 每个场景：(per_eye_states, gt_pos24, gt_pos15, gt_v15, dt)
+    per_scene = []          # 每场景：(per_eye_states, gt_pos24, gt_pos15, gt_v15, dt, ball_state)
     gt_accel_samples = []   # GT 球加速度(rig) 采样，用于核对重力
 
     for index in range(n):
@@ -232,7 +258,12 @@ def main():
         except Exception:
             pass
 
-        per_scene.append((scene_states, gt_pos24, gt_pos15, gt_v15, dt))
+        ball_state = (
+            None
+            if scene.get("ball_pos15") is None
+            else (scene["ball_pos15"], scene["ball_v15"])
+        )
+        per_scene.append((scene_states, gt_pos24, gt_pos15, gt_v15, dt, ball_state))
 
         del input_dict, target_dict, prepared, scene
         print(
@@ -252,7 +283,7 @@ def main():
     print(f"{'region':8s} {'metric':16s} {'median':>10s} {'p95':>10s} {'n_valid':>8s}")
     print("-" * 72)
     for src in sources:
-        errs = [_pos15_error(states[src], gp15) for (states, _g24, gp15, _gv, _dt) in per_scene]
+        errs = [_pos15_error(states[src], gp15) for (states, _g24, gp15, _gv, _dt, _bt) in per_scene]
         finite = [e for e in errs if e == e]
         med = finite_percentile(finite, 50) if finite else float("nan")
         p95 = finite_percentile(finite, 95) if finite else float("nan")
@@ -263,7 +294,7 @@ def main():
     print(f"{'region':8s} {'pos15_split':14s} {'along_med':>10s} {'along_p95':>10s} {'lat_med':>10s} {'lat_p95':>10s}")
     print("-" * 72)
     for src in sources:
-        decs = [_pos15_decompose(states[src], gp15) for (states, _g24, gp15, _gv, _dt) in per_scene]
+        decs = [_pos15_decompose(states[src], gp15) for (states, _g24, gp15, _gv, _dt, _bt) in per_scene]
         decs = [d for d in decs if d is not None]
         along = [d[0] for d in decs]
         lateral = [d[1] for d in decs]
@@ -278,7 +309,7 @@ def main():
     print(f"{'region':8s} {'metric':16s} {'median':>10s} {'p95':>10s} {'n_valid':>8s}")
     print("-" * 72)
     for src in sources:
-        errs = [_v15_error(states[src], gv) for (states, _g24, _gp15, gv, _dt) in per_scene]
+        errs = [_v15_error(states[src], gv) for (states, _g24, _gp15, gv, _dt, _bt) in per_scene]
         finite = [e for e in errs if e == e]
         med = finite_percentile(finite, 50) if finite else float("nan")
         p95 = finite_percentile(finite, 95) if finite else float("nan")
@@ -292,13 +323,43 @@ def main():
         for strat, name in [("free", "free(current)"), ("phys", "phys(gravity)"), ("linear", "linear")]:
             errs = [
                 _scene_error(states[src], g24, dt, gravity, strat)
-                for (states, g24, _gp15, _gv, dt) in per_scene
+                for (states, g24, _gp15, _gv, dt, _bt) in per_scene
             ]
             finite = [e for e in errs if e == e]  # 去 nan
             med = finite_percentile(finite, 50) if finite else float("nan")
             p95 = finite_percentile(finite, 95) if finite else float("nan")
             print(f"{src:8s} {name:12s} {med:10.4f} {p95:10.4f} {len(finite):8d}")
-    print("=" * 72)
+    # ③ ball token 一路（region=balltoken）：与上面三个像素法口径同批场景对比
+    bt_rows = [
+        _balltoken_errors(bt, g24, gp15, gv, dt, gravity)
+        for (_states, g24, gp15, gv, dt, bt) in per_scene
+    ]
+    bt_finite = [row for row in bt_rows if row[0] == row[0]]
+    if bt_finite:
+        def _pair(values):
+            finite = [v for v in values if v == v]
+            if not finite:
+                return float("nan"), float("nan"), 0
+            return (
+                finite_percentile(finite, 50),
+                finite_percentile(finite, 95),
+                len(finite),
+            )
+
+        print(f"{'region':8s} {'metric':16s} {'median':>10s} {'p95':>10s} {'n_valid':>8s}")
+        print("-" * 72)
+        for label, column in (
+            ("frame24", 0),
+            ("pos15_error", 1),
+            ("v15_error", 2),
+        ):
+            med, p95, n = _pair([row[column] for row in bt_rows])
+            print(f"{'balltoken':8s} {label:16s} {med:10.4f} {p95:10.4f} {n:8d}")
+        print("=" * 72)
+    else:
+        print("[note] 模型无内建 ball token（config 未开 use_ball_token），跳过 balltoken 对比")
+        print("=" * 72)
+
     print("Readout:")
     print("  pos15_error = frame24 floor; (pred - gt) = cost of ball-selection error")
     print("  along vs lateral: along = depth expected-value error, lateral = localization error")
@@ -306,6 +367,8 @@ def main():
     print("  gt x * << pred x *  -> ball selection is the bottleneck -> ball token")
     print("  frame24 minus pos15  -> contribution of v15 (velocity) + extrapolation")
     print("  v15_error x dt(~0.3)  ~= that extrapolation contribution")
+    print("  balltoken x frame24 << pred x phys  -> ball token beats the per-pixel path")
+    print("  balltoken pos15_error vs pred pos15_error  -> where the gain actually comes from")
 
 
 if __name__ == "__main__":
