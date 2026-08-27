@@ -1,0 +1,110 @@
+# 6.5cm ball token · A 组：冻结 backbone，只训 ball token
+#
+# 目的：在 6.5cm 上干净验证「ball token 直接回归球心」能否胜过逐像素反投影。
+#   backbone 取 exp0825_002 训满 40k 的产物（已在 6.5cm 上学会分小球），冻住不动，
+#   唯一有梯度的是新加的 ball_query / ball_block / ball_head（约 30M）。
+#   唯一变量就是 ball token 本身 —— 赢了说明这条路成立，输了说明问题在表征层。
+#
+# 为什么这组特别值得先跑：
+#   6.5cm 上 ball_iou farthest 只有 0.194，也就是远帧几乎选不出球像素，
+#   而像素法的整条链路（语义选球 → depth 反投影 → median）第一步就崩了。
+#   ball token 不依赖逐像素语义，面对的正是像素法的最差情况。
+#   反过来，IoU 0.194 也可能意味着 backbone 的 token 里球信号本来就弱 ——
+#   这组实验就是要回答「是语义头读不出来，还是表征里根本没有」。
+#
+# 判据（对比像素法在同一 backbone 上的 pos15）：
+#   跑 tools/verify_physics_extrapolation.py --limit 40，看 balltoken 那一路的
+#   pos15_error 是否低于 pred 那一路。训练中直接看 stream25_ball_pos_l2_m（单位米）。
+#   6.5cm 球径 0.065 m —— 误差超过 0.065 就等于没指到球。
+model: slarm
+dataset: [ball_catch_6.5cm_triview]
+data_root: data/SLARM_data_6.5
+
+input_size: [320, 240]
+patch_size: 8
+embed_dim: 768
+depth: 12
+patch_embed: conv
+num_max_cameras: 3
+num_context_timesteps: 6
+num_target_timesteps: 7
+context_stride: 3
+timespan: 0.8
+mode: window_6
+
+use_affine_token: true
+use_sky_token: true
+use_ms3_motion: true
+use_last_token: true
+shortcut_rgb: true
+add_patch_plucker_embed: true
+sigmoid_rgb: true
+num_motion_tokens: 0
+
+strict_data_loading: true
+enable_task_semantic_head: true
+terminal_context_extrapolation: true
+stream25_render_target_chunk_size: 7
+stream25_reconstruction_loss: true
+
+# ---- ball token（本实验主角）----
+use_ball_token: true
+ball_token_freeze_backbone: true      # ★ A 组：冻结。只有 ball_query/ball_block/ball_head 有梯度
+stream25_ball_pos_weight: 1.0
+stream25_ball_vel_weight: 1.0
+# 备注：24cm 上实测 ball_vel15_error≈0.176 m/s，乘 dt≈0.3 后对 frame24 的贡献
+# 与 pos15 误差量级相当。若 pos 已收敛而 frame24 仍偏大，可把 vel 权重提到 2.0 再试。
+
+# ---- 损失权重：与 exp0825_002 完全一致 ----
+# 冻结下 dense head 无梯度，这些项照算但不影响参数；保持一致是为了日志可直接横比。
+stream25_rgb_weight: 1.00
+stream25_lpips_weight: 0.05
+stream25_ball_rgb_weight: 0.50
+stream25_depth_relative_weight: 1.00
+stream25_ball_depth_metric_weight: 0.5
+stream25_semantic_weight: 1.00
+stream25_ms3_ball_weight: 1.00
+stream25_ms3_static_weight: 0.25
+stream25_opacity_weight: 0.10
+
+stream25_ms3_velocity_scale: 5.0
+stream25_ms3_acceleration_scale: 9.81
+stream25_ms3_jerk_scale: 1.0
+terminal_dynamic_velocity_threshold: 1.0
+stream25_semantic_class_weight_cap: 10.0
+
+# ---- 无 LSeg ----
+online_feat: false
+enable_feat_loss: false
+feat_loss_coeff: 0.0
+stream25_lseg_feature_weight: 0.0
+enable_depth_loss: true
+enable_sky_opacity_loss: true
+enable_perceptual_loss: true
+perceptual_weight: 0.05
+perceptual_loss_start_iter: 0
+load_depth: true
+
+# ---- 优化（只训新初始化的 ball token：正常 LR + 短 warmup + 短训）----
+lr: 1.0e-4                   # ball token 是随机初始化的新模块，需要正常量级的 LR
+stream25_trunk_lr: 2e-5      # 冻结下 trunk 无梯度，此值无实际作用（保留仅为与 B 组对齐）
+lr_sched: constant
+min_lr: 1.0e-6
+warmup_iters: 500            # 只训 30M 参数，收敛快，短 warmup 足够
+batch_size: 1
+seed: 20260827               # ★ 与 B 组同 seed：让两组的 ball_query 初始值相同，可比
+
+# ★ 从 6.5cm stage1（exp0825_002 训满 40k）继续。ckpt 里没有 ball_* 权重，
+#   misc.load_model 是 strict=False，这三个模块会随机初始化 —— 这正是本实验想要的。
+load_from: work_dirs/slarm/exp0825_002_slarm_stream25_6.5cm_triview_window6_nolseg_loadpre/checkpoints/ckpt_039999.pth
+
+train_annotation: scene_list/ball_catch_6.5cm_triview_train.txt
+eval_annotation: scene_list/ball_catch_6.5cm_triview_validation.txt
+num_iterations: 10000        # 冻结只训 ball token，10k 足够收敛
+ckpt_every_n_iters: 1000
+vis_every_n_iters: 2000
+num_vis_samples: 1
+eval_every_n_iters: 50000
+keep_n_ckpts: 10
+project: slarm
+exp_name: exp0827_001_slarm_stream25_6.5cm_triview_window6_nolseg_balltoken_frozen

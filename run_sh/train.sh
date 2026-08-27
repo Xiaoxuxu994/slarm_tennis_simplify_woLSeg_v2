@@ -8,6 +8,12 @@ GPUS="4,5,6,7"
 CONFIG="configs/exp0814_slarm_stream25_24cm_triview_window6_reproduce.yaml"
 # CONFIG="configs/slarm_stream25_24cm_triview_window6.yaml"
 
+# ---- 6.5cm ball token 对照实验（A/B 两组，起点同为 exp0825_002 的 ckpt_039999）----
+# A 组：冻结 backbone，只训 ball token —— 先跑这组，它单独回答「ball token 是否成立」
+# CONFIG="configs/exp0827_001_slarm_stream25_6.5cm_triview_window6_nolseg_balltoken_frozen.yml"
+# B 组：放开 backbone 端到端 —— A 组有结论后再跑，注意同时盯重建指标别塌
+# CONFIG="configs/exp0827_002_slarm_stream25_6.5cm_triview_window6_nolseg_balltoken_e2e.yml"
+
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 DEVICE_NUM=$(awk -F',' '{print NF}' <<< "${GPUS}")
 
