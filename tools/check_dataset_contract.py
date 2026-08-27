@@ -313,37 +313,72 @@ def check_scene(js: dict, entry: dict, data_root: Path, timespan: float,
                         f"velocity_rig 与位置差分不一致（中位差 {med:.3f} m/s）—— "
                         "ball token 的速度监督会被这个不一致污染")
 
-    # ---- 可见性标注 vs 语义图（复现 dataloader 里被 pass 掉的 preflight）----
-    if check_images:
-        _check_visibility(js, cams, n, data_root, scope, rep)
+    # ---- 可见性：先做不需要读图的部分（没装 cv2 也能查）----
+    declared = _declared_visibility(js, cams, n, scope, rep)
+    if declared is not None:
+        _check_context_visibility(declared, cams, scope, rep)
+        # 再复现 dataloader 里被 pass 掉的 preflight（这步要读语义图）
+        if check_images:
+            _check_visibility(js, cams, n, data_root, scope, rep, declared)
+
+
+def _declared_visibility(js: dict, cams, n: int, scope: str,
+                         rep: Report) -> dict[str, list[bool]] | None:
+    """把两种声明格式统一成 {相机: [每帧 bool]}。纯数据操作，不读图。"""
+    mask_by_cam = js.get("ball_visible_mask_by_camera")
+    frames_by_cam = js.get("ball_visible_frames_by_camera")
+    if mask_by_cam is None and frames_by_cam is None:
+        rep.add(FAIL, scope,
+                "缺 ball_visible_mask_by_camera / ball_visible_frames_by_camera")
+        return None
+    out: dict[str, list[bool]] = {}
+    for cam in cams:
+        if mask_by_cam is not None and cam in mask_by_cam:
+            out[cam] = [bool(x) for x in mask_by_cam[cam]]
+        elif frames_by_cam is not None and cam in frames_by_cam:
+            s = set(int(x) for x in frames_by_cam[cam])
+            out[cam] = [i in s for i in range(n)]
+        else:
+            rep.add(FAIL, scope, f"可见性标注里没有相机 {cam!r}")
+            return None
+        if len(out[cam]) != n:
+            rep.add(FAIL, scope,
+                    f"可见性标注[{cam}] 长度 {len(out[cam])} ≠ num_timesteps {n}")
+            return None
+    # 两种格式都给了就必须自洽
+    if mask_by_cam is not None and frames_by_cam is not None:
+        for cam in cams:
+            if cam in mask_by_cam and cam in frames_by_cam:
+                s = set(int(x) for x in frames_by_cam[cam])
+                if [bool(x) for x in mask_by_cam[cam]] != [i in s for i in range(n)]:
+                    rep.add(FAIL, scope,
+                            f"[{cam}] mask_by_camera 与 frames_by_camera 不一致")
+    return out
+
+
+def _check_context_visibility(declared: dict, cams, scope: str, rep: Report) -> None:
+    """context 帧必须在所有视图可见（stream25.py 的契约，那里的检查是 pass）。
+
+    这一项不需要读图，所以独立于语义图校验 —— 否则没装 cv2 就查不出来。
+    """
+    bad = [(cam, f) for cam in cams for f in CONTEXT_FRAMES if not declared[cam][f]]
+    if bad:
+        rep.add(FAIL, scope,
+                f"context 帧 {list(CONTEXT_FRAMES)} 须在所有视图可见，但 {bad} 声明不可见 —— "
+                "build_frame_eye_visibility 的契约是「每个被接纳的观测都必须在每个原生视图可见」，"
+                "而那里的检查是 pass，不会拦住；该帧的球监督会缺失")
+    else:
+        rep.add(PASS, scope, f"context 帧 {list(CONTEXT_FRAMES)} 在所有视图均可见")
 
 
 def _check_visibility(js: dict, cams, n: int, data_root: Path,
-                      scope: str, rep: Report) -> None:
+                      scope: str, rep: Report, declared: dict) -> None:
     try:
         import cv2
         import numpy as np
     except ImportError:
         rep.add(WARN, scope, "未装 cv2/numpy，跳过语义图与可见性标注的一致性校验")
         return
-
-    mask_by_cam = js.get("ball_visible_mask_by_camera")
-    frames_by_cam = js.get("ball_visible_frames_by_camera")
-    if mask_by_cam is None and frames_by_cam is None:
-        rep.add(FAIL, scope,
-                "缺 ball_visible_mask_by_camera / ball_visible_frames_by_camera")
-        return
-
-    declared: dict[str, list[bool]] = {}
-    for cam in cams:
-        if mask_by_cam is not None and cam in mask_by_cam:
-            declared[cam] = [bool(x) for x in mask_by_cam[cam]]
-        elif frames_by_cam is not None and cam in frames_by_cam:
-            s = set(int(x) for x in frames_by_cam[cam])
-            declared[cam] = [i in s for i in range(n)]
-        else:
-            rep.add(FAIL, scope, f"可见性标注里没有相机 {cam!r}")
-            return
 
     mismatches, missing_files = [], 0
     for ci, cam in enumerate(cams):
@@ -368,14 +403,6 @@ def _check_visibility(js: dict, cams, n: int, data_root: Path,
                 "不会拦住，但 ball_iou / 落点评测会被污染")
     elif not missing_files:
         rep.add(PASS, scope, "可见性标注与语义图逐帧一致")
-
-    # context 帧必须在所有视图可见（stream25.py 的契约，同样被 pass 掉）
-    bad = [(cam, f) for cam in cams for f in CONTEXT_FRAMES if not declared[cam][f]]
-    if bad:
-        rep.add(FAIL, scope,
-                f"context 帧 {CONTEXT_FRAMES} 必须在所有视图可见，但 {bad[:4]} 声明不可见")
-    else:
-        rep.add(PASS, scope, "6 个 context 帧在所有视图均可见")
 
 
 # ---------------------------------------------------------------- main
