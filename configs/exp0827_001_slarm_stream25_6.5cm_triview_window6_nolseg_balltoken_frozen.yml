@@ -36,18 +36,19 @@
 #   v15 最好 037999 = 0.0724）。评测集逐 ckpt 完全相同，所以这全是权重本身的抖动 ——
 #   stage1 用 constant LR 跑满 40k、无衰减无 EMA，每个存档都只是盆地里的一次采样。
 #
-#   于是：
-#     · "打平 0.0364"什么都不能证明，那只是一次采样的运气；
-#     · 要宣称 ball token 有效，必须稳定低于**带的下沿 0.0312**；
-#     · 边际结果（0.031~0.036）一律判为"未证实"，别急着下结论。
+#   但这条带**不影响本组的主判据**，因为 verify 的对比是配对的：
+#   同一次 verify 里同时报 pred（像素法）和 balltoken 两路，同一批 40 场景、同一组权重。
+#   所以看的是"同一个 ckpt 上，两条读出路径谁更准"，而不是"对比另一个 ckpt 记下的数"。
+#   backbone 的抖动被配对设计吃掉了。
+#
+#   带的作用在于判断**结论能不能外推**：
+#     · balltoken 显著低于同一次 verify 的 pred  → 在这个 backbone 上成立；
+#     · 但要说"ball token 这条路成立"，还得在退火后的稳定 backbone 上复现一次，
+#       否则可能只是这个采样点的性质。
 #
 #   跑 tools/verify_physics_extrapolation.py --limit 40 --ball-mask-source pred，
 #   看 balltoken 那一路对 pred 那一路。训练中直接看 stream25_ball_pos_l2_m（单位米）。
 #   6.5cm 球径 0.065 m —— 误差超过 0.065 就等于没指到球。
-#
-# 更干净的做法（若不赶时间）：
-#   先跑 exp0827_003（cosine 退火 6k 步），拿到一个稳定的 backbone 再做这组 A/B。
-#   基线不抖了，赢多少才说得清。今晚两件事可以并行跑，明天按退火结果决定要不要重做。
 model: slarm
 dataset: [ball_catch_6.5cm_triview]
 data_root: data/SLARM_data_6.5
@@ -128,12 +129,15 @@ seed: 20260827               # ★ 与 B 组同 seed：让两组的 ball_query �
 
 # ★ 从 6.5cm stage1（exp0825_002 训满 40k）继续。ckpt 里没有 ball_* 权重，
 #   misc.load_model 是 strict=False，这三个模块会随机初始化 —— 这正是本实验想要的。
-#   sweep 已跑过：不存在稳定的"最优点"（三个指标各指向不同 ckpt），所以不按 argmin 挑 ——
-#   挑 5 次噪声评测里的最小值，本身就是在向评测集过拟合。这里保留末点 039999，
-#   与 exp0827_003 退火的起点一致，三组共用同一个参照。
-#   想量一下"backbone 运气"占多少，用命令行覆盖再跑一组（见 run_sh/train.sh 里的例子），
-#   不要改这个文件。
-load_from: work_dirs/slarm/exp0825_002_slarm_stream25_6.5cm_triview_window6_nolseg_loadpre/checkpoints/ckpt_039999.pth
+#   为什么用 029999 而不是末点 039999：
+#   029999 是 sweep 里像素法 pos15 最好的一个点（0.0312）。冻结训练下 backbone 不动，
+#   这意味着 ball token 面对的是**像素法处于最佳状态**的对手 —— 这是一次偏保守的比较，
+#   在这里赢下来才可信。反过来选一个像素法状态差的 ckpt（比如 035999 的 0.1106），
+#   赢了也只是在跟一个坏基线比。
+#
+#   注意这跟"按 argmin 挑 ckpt"不是一回事：这里挑的不是"对 ball token 最有利的起点"，
+#   而是"对 ball token 最不利的起点"，方向正好相反，不存在向评测集过拟合的问题。
+load_from: work_dirs/slarm/exp0825_002_slarm_stream25_6.5cm_triview_window6_nolseg_loadpre/checkpoints/ckpt_029999.pth
 
 train_annotation: scene_list/ball_catch_6.5cm_triview_train.txt
 eval_annotation: scene_list/ball_catch_6.5cm_triview_validation.txt

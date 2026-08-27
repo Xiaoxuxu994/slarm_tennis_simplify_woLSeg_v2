@@ -23,15 +23,15 @@ CONFIG="configs/exp0814_slarm_stream25_24cm_triview_window6_reproduce.yaml"
 #      深度是 backbone 的活，A 组若只小赢，希望反而在这组；代价是可能赔上重建，盯 rgb/depth/semantic
 # CONFIG="configs/exp0827_002_slarm_stream25_6.5cm_triview_window6_nolseg_balltoken_e2e.yml"
 #
-# 三组互相无依赖，可并行：把 GPUS 拆开，开多个终端各跑一个 config。
-# 例：退火 GPUS="4"，A 用 GPUS="5"，B 用 GPUS="6"。
+# 三组互相无依赖，可并行；3 组 × 2 卡的排法：
+#   退火 GPUS="0,1"   A 组 GPUS="2,3"   B 组 GPUS="4,5"
 #
-# 想量"backbone 运气"占多少收益：用命令行覆盖起点再跑一组 A，不要改 config 文件 ——
-#   CUDA_VISIBLE_DEVICES=7 python main_slarm.py --enable_tensorboard \
-#     --config=configs/exp0827_001_slarm_stream25_6.5cm_triview_window6_nolseg_balltoken_frozen.yml \
-#     --load_from work_dirs/slarm/exp0825_002_slarm_stream25_6.5cm_triview_window6_nolseg_loadpre/checkpoints/ckpt_029999.pth \
-#     --exp_name exp0827_001b_balltoken_frozen_from029999
-# 两组 A 之差 = 换个 backbone 带来的波动；ball token 的收益必须比这个差大才算数。
+# ★ 卡数会改变全局 batch：batch_size 是 per-GPU，全局 = batch_size × world_size，
+#   代码里没有梯度累积，而且 lr 已在 config 里写死、不会随卡数自动缩放。
+#   stage1 若是 4 卡跑的（train.sh 的 GPUS 自 8/19 起一直是 "4,5,6,7"），
+#   改成 2 卡就等于全局 batch 减半、每样本步长翻倍。开跑前核对一下：
+#       grep "Global batch size" work_dirs/slarm/exp0825_002_*/logs/log.txt
+#   影响最大的是退火那组（见其 config 抬头）；A 组冻结基本不受影响。
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 DEVICE_NUM=$(awk -F',' '{print NF}' <<< "${GPUS}")

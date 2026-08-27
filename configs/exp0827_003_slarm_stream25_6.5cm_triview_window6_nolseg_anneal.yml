@@ -29,6 +29,24 @@
 #           下一步该查的是 batch/accum 而不是 LR。
 #
 # 若"稳住了但没变好"，不要靠加长退火硬压，改去查 batch_size=1 的梯度噪声。
+#
+# ★ 开跑前必须核对卡数 —— 这组最容易被这件事毁掉：
+#   batch_size 是 per-GPU（main_slarm.py:311），全局 batch = batch_size × world_size，
+#   代码里没有梯度累积，没法用 accum 补回来。而且各 config 都直接写了 lr，
+#   `if args.lr is None: args.lr = args.blr * global_batch_size / 256` 这条自动缩放
+#   不会触发 —— 也就是说卡数减半时 LR 不会跟着降，等于每个样本的步长翻倍。
+#
+#   本组是要单独检验"抖动是不是 LR 造成的"。如果同时把全局 batch 改了，
+#   就等于同时动了另一个头号嫌疑人（batch=1 的梯度噪声），结论会说不清。
+#
+#   先查 stage1 用了几张卡：
+#       grep "Global batch size" work_dirs/slarm/exp0825_002_*/logs/log.txt
+#   然后用同样的卡数跑本组。
+#
+#   如果确实只能用更少的卡：照跑，但判读要收紧 ——
+#     稳住了  → 结论仍然成立（batch 更小、噪声更大都稳住了，那只能是 LR 的功劳）；
+#     没稳住  → 不能下结论（可能是 LR，也可能是 batch 减半带来的噪声），
+#               这时补一组同卡数的 constant LR 对照才说得清。
 model: slarm
 dataset: [ball_catch_6.5cm_triview]
 data_root: data/SLARM_data_6.5

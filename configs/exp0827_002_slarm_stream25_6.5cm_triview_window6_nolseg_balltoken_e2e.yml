@@ -114,12 +114,14 @@ warmup_iters: 1000           # 随机初始化的 ball token 初期梯度很大�
 batch_size: 1
 seed: 20260827               # ★ 与 A 组同 seed：ball_query 初始值相同，两组可比
 
-# ★ 与 A 组同一个起点：6.5cm stage1（exp0825_002 训满 40k）
-#   verify_sweep 已确认 stage1 是在摆动而非收敛（pos15 在 0.031~0.111 之间跳，
-#   见 A 组 config 的判据段）。所以基线是一条带，不是 0.0364 那个数：
-#   要算赢，得稳定低于带的下沿 0.0312。
-#   起点固定在末点 039999，与 A 组和 exp0827_003 退火一致，三组共用同一个参照。
-load_from: work_dirs/slarm/exp0825_002_slarm_stream25_6.5cm_triview_window6_nolseg_loadpre/checkpoints/ckpt_039999.pth
+# ★ 与 A 组同一个起点：029999（sweep 里像素法最好的点，0.0312）。
+#   选它的理由见 A 组 config 的 load_from 段 —— 让 ball token 去打像素法的最佳状态，
+#   是一次偏保守的比较。A/B 必须同起点，否则两组之间不可比。
+#
+#   本组还有一层：放开 backbone 后 029999 会被继续改动，
+#   所以"像素法最佳状态"这个性质只在第 0 步成立，之后两条路径一起变。
+#   判读时看的是训练末尾同一次 verify 里 balltoken 对 pred 的差，不是对 0.0312 的差。
+load_from: work_dirs/slarm/exp0825_002_slarm_stream25_6.5cm_triview_window6_nolseg_loadpre/checkpoints/ckpt_029999.pth
 #
 # 两阶段方案（若 A 组证明 ball token 有效、而本组收敛慢时改用）：
 # load_from: work_dirs/slarm/exp0827_001_slarm_stream25_6.5cm_triview_window6_nolseg_balltoken_frozen/checkpoints/ckpt_009999.pth
