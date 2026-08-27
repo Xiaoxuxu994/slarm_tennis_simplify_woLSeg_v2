@@ -1,21 +1,46 @@
 # 6.5cm ball token · A 组：冻结 backbone，只训 ball token
 #
 # 目的：在 6.5cm 上干净验证「ball token 直接回归球心」能否胜过逐像素反投影。
-#   backbone 取 exp0825_002 训满 40k 的产物（已在 6.5cm 上学会分小球），冻住不动，
-#   唯一有梯度的是新加的 ball_query / ball_block / ball_head（约 30M）。
-#   唯一变量就是 ball token 本身 —— 赢了说明这条路成立，输了说明问题在表征层。
+#   backbone 取 exp0825_002 训满 40k 的产物，冻住不动，唯一有梯度的是新加的
+#   ball_query / ball_block / ball_head。唯一变量就是 ball token 本身。
 #
-# 为什么这组特别值得先跑：
-#   6.5cm 上 ball_iou farthest 只有 0.194，也就是远帧几乎选不出球像素，
-#   而像素法的整条链路（语义选球 → depth 反投影 → median）第一步就崩了。
-#   ball token 不依赖逐像素语义，面对的正是像素法的最差情况。
-#   反过来，IoU 0.194 也可能意味着 backbone 的 token 里球信号本来就弱 ——
-#   这组实验就是要回答「是语义头读不出来，还是表征里根本没有」。
+# ─────────────────────────────────────────────────────────────
+# 这组要打败的东西是什么（2026-08-26 verify 结果，已修正早先的判断）：
 #
-# 判据（对比像素法在同一 backbone 上的 pos15）：
-#   跑 tools/verify_physics_extrapolation.py --limit 40，看 balltoken 那一路的
-#   pos15_error 是否低于 pred 那一路。训练中直接看 stream25_ball_pos_l2_m（单位米）。
+#   像素法链路是三步：语义选球 → depth 反投影 → 多视角 median。
+#   verify --limit 40 在 ckpt_039999 上跑出来：
+#       pred mask  pos15 median 0.0364 m
+#       gt   mask  pos15 median 0.0375 m
+#   两者几乎相同 —— 换成完美的球 mask 也不会更好，**语义选球不是瓶颈**。
+#   （ball_iou farthest 只有 0.194，但那说的是"选中的像素少"，
+#     少数选中像素的中心位置仍然是对的，所以 median 不受影响。）
+#
+#   误差实际来自第二步：沿射线方向（深度）占误差能量的 95.5%，
+#   横向只占 4.5%。也就是说球的方向找得准，距离估得不准。
+#
+#   所以 ball token 的卖点不是"绕开语义头"，而是：
+#     1. 绕开 depth 反投影 —— 直接从 token 回归 3D 坐标，不经过深度图；
+#     2. 三视角 token 在 attention 里联合推断，天然带三角化信息，
+#        而像素法是各视角独立反投影后再取 median（median 消不掉共同的深度偏置）。
+#   24cm 上 ball token 赢 38% 时也是 pred≈gt 的局面，与这个解释一致。
+#
+#   如果这组输了，说明 aggregator 的 token 里根本没有足够的深度信息，
+#   问题在表征层而不在读出方式 —— 那时该做的是加多视角几何约束，而不是调 ball head。
+# ─────────────────────────────────────────────────────────────
+#
+# 判据（同 backbone、同 40 场景横比）：
+#   跑 tools/verify_physics_extrapolation.py --limit 40 --ball-mask-source pred，
+#   看 balltoken 那一路是否低于下面这条基线：
+#       pos15_error        median 0.0364   p95 0.0863
+#       phys(gravity) f24   median 0.0417   p95 0.1062
+#   训练中直接看 stream25_ball_pos_l2_m（单位米）。
 #   6.5cm 球径 0.065 m —— 误差超过 0.065 就等于没指到球。
+#
+# 一个必须记住的前提：
+#   stage1 本身还没收敛（35999 → 39999 的 pos15 改善了 2.77×）。
+#   如果 run_sh/verify_sweep.sh 显示曲线仍在单调下降，那么"继续训 stage1"
+#   的收益可能高于"加 ball token"。这两组照跑，但结论要按
+#   「在一个未收敛的 backbone 上测得」来解读，日后需在收敛的 backbone 上复现。
 model: slarm
 dataset: [ball_catch_6.5cm_triview]
 data_root: data/SLARM_data_6.5
@@ -90,12 +115,14 @@ lr: 1.0e-4                   # ball token 是随机初始化的新模块，需�
 stream25_trunk_lr: 2e-5      # 冻结下 trunk 无梯度，此值无实际作用（保留仅为与 B 组对齐）
 lr_sched: constant
 min_lr: 1.0e-6
-warmup_iters: 500            # 只训 30M 参数，收敛快，短 warmup 足够
+warmup_iters: 500            # 只训 ball token，收敛快，短 warmup 足够
 batch_size: 1
 seed: 20260827               # ★ 与 B 组同 seed：让两组的 ball_query 初始值相同，可比
 
 # ★ 从 6.5cm stage1（exp0825_002 训满 40k）继续。ckpt 里没有 ball_* 权重，
 #   misc.load_model 是 strict=False，这三个模块会随机初始化 —— 这正是本实验想要的。
+#   若 verify_sweep 判定 039999 并非最优点，把这里换成 sweep 给出的最优迭代号，
+#   并同步改 B 组，保证两组起点一致。
 load_from: work_dirs/slarm/exp0825_002_slarm_stream25_6.5cm_triview_window6_nolseg_loadpre/checkpoints/ckpt_039999.pth
 
 train_annotation: scene_list/ball_catch_6.5cm_triview_train.txt

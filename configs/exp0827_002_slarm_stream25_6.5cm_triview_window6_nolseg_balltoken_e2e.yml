@@ -1,27 +1,35 @@
 # 6.5cm ball token · B 组：放开 backbone，端到端训练
 #
 # 与 A 组（frozen）的唯一区别是 ball_token_freeze_backbone: false 以及随之调整的 LR。
-# 目的：看 backbone 能否为了球定位这个新目标进一步调整表征 —— 上限更高，但风险也在这里。
+# 前提、基线、判据见 A 组 config 开头那段（那里写了为什么误差出在深度而不在选球）。
 #
 # ─────────────────────────────────────────────────────────────
-# 这组有一个内在矛盾，LR 是按它定的：
+# 这组存在的理由，和 A 组不一样：
+#
+#   A 组问的是「现有表征里的球信息够不够读出来」。
+#   B 组问的是「如果不够，backbone 能不能为球定位再学一点」。
+#
+#   而 verify 已经告诉我们误差 95.5% 在深度方向 —— 深度是 backbone 的活，
+#   不是 ball head 能补的。所以如果 A 组只小赢或不赢，B 组反而是更有希望的一组：
+#   只有放开 backbone，才可能改善它对小球距离的估计。
+#   代价是可能把已经收敛的重建能力赔进去，所以下面 LR 压得很低。
+# ─────────────────────────────────────────────────────────────
+#
+# LR 是这么定的（有个内在矛盾）：
 #
 #   ball token 是随机初始化的新模块，需要较大 LR 才学得起来；
-#   而 backbone 已经在 6.5cm 上训满 40k、收敛得好，大 LR 会把它破坏掉。
+#   而 backbone 已经在 6.5cm 上训了 40k，大 LR 会把它破坏掉。
 #
 #   麻烦在于 make_stream25_param_groups 只分 trunk / head 两组，
 #   ball_query/ball_block/ball_head 被归进 head（_TRUNK_PREFIXES 只含
 #   aggregator. / patch_embed / aggregated_last_tokens_norm），
 #   也就是说 ball token 和 gaussian head、语义头共用同一个 args.lr —— 没法只给 ball token 开大。
 #
-# 折中：head LR 降到 stage1 的 30%，trunk LR 压得更狠（比例从 5:1 收到 10:1）。
-#   backbone 是这次最该保护的资产（它花了 40k 步才学会看 6.5cm 小球），
+#   折中：head LR 降到 stage1 的 30%，trunk LR 压得更狠（比例从 5:1 收到 10:1）。
 #   宁可 ball token 学慢一点，也不能把重建赔进去。
 #
-# 如果跑下来发现 ball token 收敛太慢，正确的做法不是调大这里的 LR，
-# 而是改走两阶段：先用 A 组的 frozen 产物做 load_from，再用这份 config 端到端微调。
-# 那样 ball token 已经训好，端到端阶段只需要小 LR 做联合调整。
-# ─────────────────────────────────────────────────────────────
+#   如果跑下来 ball token 收敛太慢，正确的做法不是调大这里的 LR，
+#   而是改走两阶段：先用 A 组的 frozen 产物做 load_from，再用这份 config 端到端微调。
 #
 # 必须盯的指标（比 A 组多）：
 #   A 组冻结，dense loss 无梯度，只看 ball_pos_l2_m 就够；
@@ -95,7 +103,7 @@ perceptual_weight: 0.05
 perceptual_loss_start_iter: 0
 load_depth: true
 
-# ---- 优化（同域微调：backbone 已收敛，LR 必须比 stage1 小得多）----
+# ---- 优化（同域微调：backbone 已训 40k，LR 必须比 stage1 小得多）----
 # stage1 是 1e-4 / 2e-5，那是跨域迁移（24cm → 6.5cm，要重学小球尺度）；
 # 这里是同域续训，backbone 只需微调，用那个 LR 会把已学到的东西冲掉。
 lr: 3.0e-5                   # stage1 的 30%
@@ -107,6 +115,8 @@ batch_size: 1
 seed: 20260827               # ★ 与 A 组同 seed：ball_query 初始值相同，两组可比
 
 # ★ 与 A 组同一个起点：6.5cm stage1（exp0825_002 训满 40k）
+#   注意 stage1 在 39999 尚未收敛，若 verify_sweep 给出更优的迭代号，
+#   A/B 两组要同时改，否则失去可比性。
 load_from: work_dirs/slarm/exp0825_002_slarm_stream25_6.5cm_triview_window6_nolseg_loadpre/checkpoints/ckpt_039999.pth
 #
 # 两阶段方案（若 A 组证明 ball token 有效、而本组收敛慢时改用）：
