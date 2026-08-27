@@ -115,8 +115,10 @@ batch_size: 1
 seed: 20260827               # ★ 与 A 组同 seed：ball_query 初始值相同，两组可比
 
 # ★ 与 A 组同一个起点：6.5cm stage1（exp0825_002 训满 40k）
-#   注意 stage1 在 39999 尚未收敛，若 verify_sweep 给出更优的迭代号，
-#   A/B 两组要同时改，否则失去可比性。
+#   verify_sweep 已确认 stage1 是在摆动而非收敛（pos15 在 0.031~0.111 之间跳，
+#   见 A 组 config 的判据段）。所以基线是一条带，不是 0.0364 那个数：
+#   要算赢，得稳定低于带的下沿 0.0312。
+#   起点固定在末点 039999，与 A 组和 exp0827_003 退火一致，三组共用同一个参照。
 load_from: work_dirs/slarm/exp0825_002_slarm_stream25_6.5cm_triview_window6_nolseg_loadpre/checkpoints/ckpt_039999.pth
 #
 # 两阶段方案（若 A 组证明 ball token 有效、而本组收敛慢时改用）：

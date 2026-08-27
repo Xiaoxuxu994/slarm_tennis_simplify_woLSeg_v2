@@ -1,0 +1,121 @@
+# 6.5cm stage1 收尾退火（noLSeg）：给 exp0825_002 补一段 LR 衰减
+#
+# ─────────────────────────────────────────────────────────────
+# 为什么要有这一组（2026-08-27 verify_sweep 的直接结论）：
+#
+#   exp0825_002 用 lr_sched: constant 跑满 40k，全程 lr=1e-4 不衰减，也没有 EMA。
+#   扫 5 个 ckpt 的 pos15 median（同一份 scene_list 的前 40 个场景，逐 ckpt 完全相同）：
+#       029999  0.0312     033999  0.0353     035999  0.1106
+#       037999  0.0623     039999  0.0364
+#   摆动幅度 3.5×，而且没有任何一个 ckpt 全面占优：
+#       median 最好是 029999，p95 最好是 033999（0.0644），v15 最好是 037999（0.0724）。
+#   三个指标各指向不同的 ckpt —— 这是噪声的特征，不是质量排序。
+#
+#   评测集逐 ckpt 完全一致，所以这 3.5× 全部来自权重本身：
+#   恒定大 LR 让模型一直在盆地里弹，每个存档都只是一次随机采样，不是收敛点。
+#
+#   这组就是补上那段缺失的衰减：cosine 1e-4 → 1e-6，6k 步。
+#   如果摆动确实由 LR 造成，结果应该落在 0.031 附近**并且稳住**
+#   —— 相邻 ckpt 之间不再有 2× 以上的跳变。
+#
+#   这比加任何新模块都便宜，而且一旦成立，后面所有实验（含 ball token A/B）
+#   都该以这组的产物为起点，否则基线本身就有 3.5× 的不确定度，赢多少都说不清。
+# ─────────────────────────────────────────────────────────────
+#
+# 判读方式（跑 run_sh/verify_sweep.sh，把 CKPT_DIR 指到本实验）：
+#   成功  = 末几个 ckpt 的 pos15 彼此接近（相邻变化 <20%），且 ≤0.031；
+#   部分成功 = 稳住了但没变好 —— 说明摆动是 LR 造成的，但 0.035 就是这个 backbone 的水平；
+#   失败  = 仍然乱跳 —— 那摆动另有来源（batch_size 1 的梯度噪声、数据里有难场景），
+#           下一步该查的是 batch/accum 而不是 LR。
+#
+# 若"稳住了但没变好"，不要靠加长退火硬压，改去查 batch_size=1 的梯度噪声。
+model: slarm
+dataset: [ball_catch_6.5cm_triview]
+data_root: data/SLARM_data_6.5
+
+input_size: [320, 240]
+patch_size: 8
+embed_dim: 768
+depth: 12
+patch_embed: conv
+num_max_cameras: 3
+num_context_timesteps: 6
+num_target_timesteps: 7
+context_stride: 3
+timespan: 0.8
+mode: window_6
+
+use_affine_token: true
+use_sky_token: true
+use_ms3_motion: true
+use_last_token: true
+shortcut_rgb: true
+add_patch_plucker_embed: true
+sigmoid_rgb: true
+num_motion_tokens: 0
+
+strict_data_loading: true
+enable_task_semantic_head: true
+terminal_context_extrapolation: true
+stream25_render_target_chunk_size: 7
+stream25_reconstruction_loss: true
+
+# ---- 不开 ball token：这组只回答"退火能不能让 stage1 稳下来" ----
+# 掺进新模块会让"变好了"分不清是退火的功劳还是 ball token 的功劳。
+use_ball_token: false
+
+# ---- 损失权重：与 exp0825_002 逐项一致（这组只改 LR 调度，别的都不能动）----
+stream25_rgb_weight: 1.00
+stream25_lpips_weight: 0.05
+stream25_ball_rgb_weight: 0.50
+stream25_depth_relative_weight: 1.00
+stream25_ball_depth_metric_weight: 0.5
+stream25_semantic_weight: 1.00
+stream25_ms3_ball_weight: 1.00
+stream25_ms3_static_weight: 0.25
+stream25_opacity_weight: 0.10
+
+stream25_ms3_velocity_scale: 5.0
+stream25_ms3_acceleration_scale: 9.81
+stream25_ms3_jerk_scale: 1.0
+terminal_dynamic_velocity_threshold: 1.0
+stream25_semantic_class_weight_cap: 10.0
+
+# ---- 无 LSeg ----
+online_feat: false
+enable_feat_loss: false
+feat_loss_coeff: 0.0
+stream25_lseg_feature_weight: 0.0
+enable_depth_loss: true
+enable_sky_opacity_loss: true
+enable_perceptual_loss: true
+perceptual_weight: 0.05
+perceptual_loss_start_iter: 0
+load_depth: true
+
+# ---- 优化：唯一的改动就在这里 ----
+lr: 1.0e-4                   # 与 stage1 同一个峰值：这组是"接着原来那段跑，只是加上衰减"
+stream25_trunk_lr: 2e-5      # 同 stage1，保持 5:1
+lr_sched: cosine             # ★ 唯一实质改动：constant → cosine
+min_lr: 1.0e-6
+warmup_iters: 200            # load_from 只恢复权重不恢复 Adam 动量（misc.load_model 里没有
+                             # optimizer.load_state_dict），二阶矩从零重建，头几十步步长会偏大，
+                             # 短 warmup 挡一下。设太长会吃掉本就不多的低 LR 步数。
+batch_size: 1
+seed: 20260827
+
+# 从 stage1 末点接着退火
+load_from: work_dirs/slarm/exp0825_002_slarm_stream25_6.5cm_triview_window6_nolseg_loadpre/checkpoints/ckpt_039999.pth
+
+train_annotation: scene_list/ball_catch_6.5cm_triview_train.txt
+eval_annotation: scene_list/ball_catch_6.5cm_triview_validation.txt
+num_iterations: 6000         # cosine 在 ~3000 步降到 5e-5、~4800 步降到 1e-5，
+                             # 真正"低 LR 落定"的有 1000 步出头，够看出稳不稳。
+                             # 不够就加到 10000，不要改低 lr 峰值（那会变成另一个实验）。
+ckpt_every_n_iters: 1000     # 存 6 个，正好够 verify_sweep 判断"稳没稳"
+vis_every_n_iters: 2000
+num_vis_samples: 1
+eval_every_n_iters: 50000
+keep_n_ckpts: 6
+project: slarm
+exp_name: exp0827_003_slarm_stream25_6.5cm_triview_window6_nolseg_anneal

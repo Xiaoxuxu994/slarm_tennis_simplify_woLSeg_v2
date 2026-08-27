@@ -28,19 +28,26 @@
 #   问题在表征层而不在读出方式 —— 那时该做的是加多视角几何约束，而不是调 ball head。
 # ─────────────────────────────────────────────────────────────
 #
-# 判据（同 backbone、同 40 场景横比）：
+# 判据 —— 注意基线不是一个数，是一条带（2026-08-27 verify_sweep）：
+#
+#   扫 exp0825_002 的 5 个 ckpt，pos15 median 分别是
+#       029999 0.0312   033999 0.0353   035999 0.1106   037999 0.0623   039999 0.0364
+#   摆动 3.5×，且没有任何 ckpt 全面占优（median 最好 029999，p95 最好 033999 = 0.0644，
+#   v15 最好 037999 = 0.0724）。评测集逐 ckpt 完全相同，所以这全是权重本身的抖动 ——
+#   stage1 用 constant LR 跑满 40k、无衰减无 EMA，每个存档都只是盆地里的一次采样。
+#
+#   于是：
+#     · "打平 0.0364"什么都不能证明，那只是一次采样的运气；
+#     · 要宣称 ball token 有效，必须稳定低于**带的下沿 0.0312**；
+#     · 边际结果（0.031~0.036）一律判为"未证实"，别急着下结论。
+#
 #   跑 tools/verify_physics_extrapolation.py --limit 40 --ball-mask-source pred，
-#   看 balltoken 那一路是否低于下面这条基线：
-#       pos15_error        median 0.0364   p95 0.0863
-#       phys(gravity) f24   median 0.0417   p95 0.1062
-#   训练中直接看 stream25_ball_pos_l2_m（单位米）。
+#   看 balltoken 那一路对 pred 那一路。训练中直接看 stream25_ball_pos_l2_m（单位米）。
 #   6.5cm 球径 0.065 m —— 误差超过 0.065 就等于没指到球。
 #
-# 一个必须记住的前提：
-#   stage1 本身还没收敛（35999 → 39999 的 pos15 改善了 2.77×）。
-#   如果 run_sh/verify_sweep.sh 显示曲线仍在单调下降，那么"继续训 stage1"
-#   的收益可能高于"加 ball token"。这两组照跑，但结论要按
-#   「在一个未收敛的 backbone 上测得」来解读，日后需在收敛的 backbone 上复现。
+# 更干净的做法（若不赶时间）：
+#   先跑 exp0827_003（cosine 退火 6k 步），拿到一个稳定的 backbone 再做这组 A/B。
+#   基线不抖了，赢多少才说得清。今晚两件事可以并行跑，明天按退火结果决定要不要重做。
 model: slarm
 dataset: [ball_catch_6.5cm_triview]
 data_root: data/SLARM_data_6.5
@@ -121,8 +128,11 @@ seed: 20260827               # ★ 与 B 组同 seed：让两组的 ball_query �
 
 # ★ 从 6.5cm stage1（exp0825_002 训满 40k）继续。ckpt 里没有 ball_* 权重，
 #   misc.load_model 是 strict=False，这三个模块会随机初始化 —— 这正是本实验想要的。
-#   若 verify_sweep 判定 039999 并非最优点，把这里换成 sweep 给出的最优迭代号，
-#   并同步改 B 组，保证两组起点一致。
+#   sweep 已跑过：不存在稳定的"最优点"（三个指标各指向不同 ckpt），所以不按 argmin 挑 ——
+#   挑 5 次噪声评测里的最小值，本身就是在向评测集过拟合。这里保留末点 039999，
+#   与 exp0827_003 退火的起点一致，三组共用同一个参照。
+#   想量一下"backbone 运气"占多少，用命令行覆盖再跑一组（见 run_sh/train.sh 里的例子），
+#   不要改这个文件。
 load_from: work_dirs/slarm/exp0825_002_slarm_stream25_6.5cm_triview_window6_nolseg_loadpre/checkpoints/ckpt_039999.pth
 
 train_annotation: scene_list/ball_catch_6.5cm_triview_train.txt
