@@ -17,7 +17,7 @@ ball_pos15_error 莫名其妙地大、落点误差收不下去，而日志里一
 
 用法
 ----
-    python tools/check_dataset_contract.py --data-root data/SLARM_data_catch45
+    python tools/check_dataset_contract.py --data-root data/slarm_data_catch45
     python tools/check_dataset_contract.py --data-root ... --limit 20 --timespan 0.8
 
 只依赖标准库；有 cv2 时会额外校验语义图与可见性标注是否一致（强烈建议装）。
@@ -568,7 +568,7 @@ def main() -> int:
         description="Contract self-check before onboarding a dataset. Runs the validations "
                     "that exist in the dataloader but whose failure branches are all `pass`.")
     ap.add_argument("--data-root", type=Path, required=True,
-                    help="e.g. data/SLARM_data_catch45")
+                    help="e.g. data/slarm_data_catch45")
     ap.add_argument("--annotation", type=str, default=None,
                     help="scene_list txt; defaults to every scene_list/*.txt under data-root")
     ap.add_argument("--limit", type=int, default=5,

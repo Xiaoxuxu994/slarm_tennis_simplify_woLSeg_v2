@@ -193,10 +193,10 @@ DATASET_DICT = {
         "ref_camera": "front_left",
     },
 
-    # catch45 场景数据。结构与 6.5cm 相同，只换数据源（data_root: data/SLARM_data_catch45）。
+    # catch45 场景数据。结构与 6.5cm 相同，只换数据源（data_root: data/slarm_data_catch45）。
     # ★ 这个 key 必须与标注 JSON 里的 "dataset" 字段逐字一致，否则 DATASETS/DATASET_DICT
     #   都取不到条目 —— 前者在 canonical 变换处 KeyError，后者在取 camera_list 时 KeyError。
-    #   核对：python3 tools/check_dataset_contract.py --data-root data/SLARM_data_catch45 --json-only
+    #   核对：python3 tools/check_dataset_contract.py --data-root data/slarm_data_catch45 --json-only
     "ball_catch_6.5cm_triview_catch45": {
         "size": [320, 240],
         "temporal": True,

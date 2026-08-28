@@ -16,7 +16,7 @@ set -euo pipefail
 # 改这里
 # ============================================================
 
-DATA_ROOT="data/SLARM_data_catch45"                       # 数据根目录
+DATA_ROOT="data/slarm_data_catch45"                       # 数据根目录
 DATASET="ball_catch_6.5cm_triview_catch45"                # 与标注 JSON 的 dataset 字段一致
 SPLIT="training"                                          # training / validation
 SCENE="scene_5000"                                        # 场景目录名

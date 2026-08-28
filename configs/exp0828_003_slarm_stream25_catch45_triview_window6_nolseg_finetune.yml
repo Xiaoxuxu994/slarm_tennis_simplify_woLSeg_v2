@@ -15,27 +15,37 @@
 #   这是这几天最大的收获，适用于此后每一组训练。
 # ─────────────────────────────────────────────────────────────
 #
-# ★ 开跑前必须核对三件事（照着做，别跳过）：
+# 数据契约已核对（2026-08-28，check_dataset_contract.py，600 场景抽 3）：
+#   dataset 名  = ball_catch_6.5cm_triview_catch45    与下面和 constants.py 两处注册一致
+#   timespan    = 0.8                                 二阶差分反推重力自洽，通过
+#   scene_list  = ..._train.txt / ..._validation.txt  与下面一致（另有 _final_test.txt）
+#   其余 38 项契约检查全部通过。
 #
-#   1) 数据集名。dataset 字段必须与标注 JSON 里的 "dataset" 逐字一致，
-#      否则 DATASETS / DATASET_DICT 都取不到条目，会在 canonical 变换或取
-#      camera_list 时 KeyError。核对：
-#          python3 tools/check_dataset_contract.py \
-#              --data-root data/SLARM_data_catch45 --json-only --limit 3
-#      名字不是下面这个的话，同时改这里和 src/dataset/constants.py 的两处注册。
+# ★ 但有一个数据层面的限制，解读本组结果时必须先看它：
 #
-#   2) timespan。下面写的 0.8 是照抄 6.5cm 的。catch45 若不同，
-#      物理外推（pos15 + v15*dt + 0.5*g*dt^2）的 dt 就错了，落点指标会系统性偏。
-#      dataloader 里那条 timespan 校验是空的（if ...: pass），不会拦你。
-#      checker 会用二阶差分反推重力并与 -9.81 比对，那条过了就说明 timespan 对。
+#   context 帧（[0,3,6,9,12,15]）的球可见性在后段掉得厉害，且模式很固定 ——
+#   永远是 front_left + front_right 一起失明，永远是后段帧，frame15 最严重，
+#   lower_front 基本不受影响。物理上说得通：球朝相机飞来，到 frame15 已经
+#   飞出前视双目的视野，只有朝下那个还看得见。
 #
-#   3) scene_list 文件名。下面两个名字要与 data/SLARM_data_catch45/scene_list/ 下
-#      实际的文件对得上（constants.py 里的注册项也写了同样两个名字）。
+#   代价不在训练（下面这段是查过代码的，别再按"监督缺失"理解）：
+#     - datasets.py:1088 用语义图里真实的球像素覆盖 JSON 声明的可见性；
+#     - 损失只读逐像素 ball_mask，且有 if ball_mask.any() 兜底 ——
+#       那些 (帧,视图) 格子对 ball_rgb / ball_depth 贡献 0，不会崩；
+#     - position_rig / velocity_rig / MS3 来自 ball_trajectory，与可见性无关，完全不受影响；
+#     - ball_visible 这个字段在 src/utils 和 src/models 里一次都没被用到，只有 eval 读。
 #
-# 已知的一处数据缺陷（之前 checker 在 catch45 上报过）：
-#   lower_front 在 frame 0 的球可见性标注是 false，而 frame 0 是 context 帧
-#   （context = [0,3,6,9,12,15]）。不影响图像输入，但该相机该帧的球监督会被跳过，
-#   ball_iou 的分母也会少一格。量不大，但解读 anchor 桶指标时要记得。
+#   代价在推理：像素法给每个"看得见球"的视图反投影一条射线取 median。
+#   frame15 只剩一个视图时就退化成单视图反投影，而深度已经是 frame24 误差的 95%。
+#   frame15 是 terminal frame —— 物理外推的起点、terminal_context_extrapolation 的锚点。
+#
+#   所以开跑前先跑这两条，拿到分布再决定怎么读后面的数字：
+#       python tools/check_dataset_contract.py --data-root data/slarm_data_catch45 --visibility-summary
+#       python tools/check_dataset_contract.py --data-root data/SLARM_data_6.5 --visibility-summary
+#   后者是对照 —— 6.5cm 是退火跑出 frame24=0.026 的那份数据。两张表的 frame15 行如果
+#   差不多，说明这是这类数据的常态；如果 6.5cm 接近全 0，那 catch45 就是数据层面多了
+#   一个天花板，指标掉下来别算模型的账。all-blind 那列非零的场景无法挽救 ——
+#   三视图都看不见球，那一帧根本没法定位，frame15 全盲的场景是纯噪声。
 #
 # LR 怎么定 —— 先测 zero-shot，别拍脑袋：
 #   用退火 ckpt + 本 config 直接跑一次 eval（不训练），看崩到什么程度。
@@ -47,7 +57,7 @@
 #   模型对"地面在 rig 下大概多低"是有先验的，这一项就够造成可观的退化。
 model: slarm
 dataset: [ball_catch_6.5cm_triview_catch45]
-data_root: data/SLARM_data_catch45
+data_root: data/slarm_data_catch45
 
 input_size: [320, 240]
 patch_size: 8
@@ -58,7 +68,7 @@ num_max_cameras: 3
 num_context_timesteps: 6
 num_target_timesteps: 7
 context_stride: 3
-timespan: 0.8                # ★ 核对项 2
+timespan: 0.8                # 已核对：重力自洽检查通过
 mode: window_6
 
 use_affine_token: true
@@ -123,8 +133,8 @@ seed: 20260828
 # ★ 起点：6.5cm 退火终点（当前最好的 backbone）
 load_from: work_dirs/slarm/exp0827_003_slarm_stream25_6.5cm_triview_window6_nolseg_anneal/checkpoints/ckpt_005999.pth
 
-train_annotation: scene_list/ball_catch_6.5cm_triview_catch45_train.txt          # ★ 核对项 3
-eval_annotation: scene_list/ball_catch_6.5cm_triview_catch45_validation.txt      # ★ 核对项 3
+train_annotation: scene_list/ball_catch_6.5cm_triview_catch45_train.txt          # 已核对
+eval_annotation: scene_list/ball_catch_6.5cm_triview_catch45_validation.txt      # 已核对
 num_iterations: 20000        # cosine 按这个长度铺开；中途改它 LR 曲线会跳变
 ckpt_every_n_iters: 2000
 vis_every_n_iters: 4000
