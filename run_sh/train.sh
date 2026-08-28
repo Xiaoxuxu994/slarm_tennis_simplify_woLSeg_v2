@@ -24,7 +24,12 @@ RESUME=0
 #
 # 另已知：误差 95.5% 在深度方向，语义选球不是瓶颈（pred≈gt mask）。细节见各 config 抬头。
 #
-# ── 当前这一轮（8/28，起点统一为退火终点 exp0827_003 的 ckpt_005999）──
+# ── catch45 场景微调（新数据）──
+# 起点是退火终点，目前最好的 backbone。开跑前先做 config 抬头列的三项核对 + zero-shot 评测。
+# CONFIG="configs/exp0828_003_slarm_stream25_catch45_triview_window6_nolseg_finetune.yml"
+#
+# ── ball token A/B（8/28，起点统一为退火终点 exp0827_003 的 ckpt_005999）──
+# A 组已在 029999 上判负（frame24 0.087 vs 像素法 0.038），下面两组优先级低
 # A 组：冻结 backbone，只训 ball token —— 在一个**已经很好**的 backbone 上还有没有增量
 # CONFIG="configs/exp0828_001_slarm_stream25_6.5cm_triview_window6_nolseg_balltoken_frozen_anneal.yml"
 # B 组：放开 backbone 端到端 —— 收敛的 backbone 会不会为球定位离开当前极小值

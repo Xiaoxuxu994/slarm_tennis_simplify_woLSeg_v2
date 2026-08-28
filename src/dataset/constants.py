@@ -20,6 +20,10 @@ DATASETS = {
     "ball_catch_24cm_stereo40_stream25_nopitch": {"opencv2dataset": opencv2waymo, "canonical_to_flu": np.eye(4)},
     "ball_catch_24cm_triview": {"opencv2dataset": opencv2waymo, "canonical_to_flu": np.eye(4)},
     "ball_catch_6.5cm_triview": {"opencv2dataset": opencv2waymo, "canonical_to_flu": np.eye(4)},
+    # catch45：与 6.5cm 同一套坐标约定（相机 OpenCV → 数据集 waymo 轴序，canonical 已是 FLU）。
+    # rig 原点高度不同（catch45 离地 1.0m，24cm/6.5cm 是 1.5m）不在这里体现 ——
+    # rig_to_world 是逐场景从标注 JSON 读的，这两个矩阵只描述轴序约定。
+    "ball_catch_6.5cm_triview_catch45": {"opencv2dataset": opencv2waymo, "canonical_to_flu": np.eye(4)},
 }
 
 waymo_train = "scene_list/waymo_train.txt"  # NOTE: Use full data for multi-GPU
@@ -182,6 +186,24 @@ DATASET_DICT = {
         "num_target_timesteps": 7,
         "annotation_txt_file_train": "scene_list/ball_catch_6.5cm_triview_train.txt",
         "annotation_txt_file_val": "scene_list/ball_catch_6.5cm_triview_validation.txt",
+        "camera_list": {
+            2: ["front_left", "front_right"],
+            3: ["front_left", "front_right", "lower_front"],
+        },
+        "ref_camera": "front_left",
+    },
+
+    # catch45 场景数据。结构与 6.5cm 相同，只换数据源（data_root: data/SLARM_data_catch45）。
+    # ★ 这个 key 必须与标注 JSON 里的 "dataset" 字段逐字一致，否则 DATASETS/DATASET_DICT
+    #   都取不到条目 —— 前者在 canonical 变换处 KeyError，后者在取 camera_list 时 KeyError。
+    #   核对：python3 tools/check_dataset_contract.py --data-root data/SLARM_data_catch45 --json-only
+    "ball_catch_6.5cm_triview_catch45": {
+        "size": [320, 240],
+        "temporal": True,
+        "num_context_timesteps": 6,
+        "num_target_timesteps": 7,
+        "annotation_txt_file_train": "scene_list/ball_catch_6.5cm_triview_catch45_train.txt",
+        "annotation_txt_file_val": "scene_list/ball_catch_6.5cm_triview_catch45_validation.txt",
         "camera_list": {
             2: ["front_left", "front_right"],
             3: ["front_left", "front_right", "lower_front"],
