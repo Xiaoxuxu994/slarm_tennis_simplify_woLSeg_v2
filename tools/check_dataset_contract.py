@@ -393,13 +393,31 @@ def _check_context_visibility(declared: dict, cams, scope: str, rep: Report) -> 
     这一项不需要读图，所以独立于语义图校验 —— 否则没装 cv2 就查不出来。
     """
     bad = [(cam, f) for cam in cams for f in CONTEXT_FRAMES if not declared[cam][f]]
-    if bad:
+    blind = sorted({f for f in CONTEXT_FRAMES if all(not declared[c][f] for c in cams)})
+    if blind:
+        # 所有视图都看不到球 -> 这一帧根本无法定位球，落点评测里这类场景是纯噪声
         rep.add(FAIL, scope,
-                f"context frames {list(CONTEXT_FRAMES)} must be visible in every view, but "
-                f"{bad} are declared not visible. build_frame_eye_visibility requires every "
-                "accepted observation to be visible in every native view, and its check is a "
-                "no-op, so nothing stops this; the ball supervision for those frames is lost")
-    else:
+                f"context frames {blind} have NO camera that can see the ball. Nothing can "
+                "localize the ball at those frames; if frame 15 is among them the whole "
+                "landing prediction for this scene is unanchored")
+    if bad:
+        n_view = len(cams)
+        by_frame = {}
+        for cam, f in bad:
+            by_frame.setdefault(f, []).append(cam)
+        detail = "; ".join(f"frame {f}: {sorted(v)} ({len(v)}/{n_view} views blind)"
+                           for f, v in sorted(by_frame.items()))
+        rep.add(FAIL, scope,
+                f"context frames are not visible in every view -> {detail}. "
+                "build_frame_eye_visibility requires every admitted observation to be visible "
+                "in every native view and its check is a no-op, so nothing stops this. "
+                "What it actually costs: training only reads ball_mask per pixel and guards "
+                "with `if ball_mask.any()`, so nothing crashes -- those (frame, view) cells "
+                "just contribute zero to ball_rgb and ball_depth. The trajectory targets "
+                "(position_rig / velocity_rig / MS3) come from ball_trajectory and are "
+                "unaffected. The real cost is at inference: fewer views means the pixel path "
+                "back-projects from fewer rays, and depth is already 95% of its error")
+    elif not blind:
         rep.add(PASS, scope,
                 f"context frames {list(CONTEXT_FRAMES)} are visible in every view")
 
@@ -441,6 +459,109 @@ def _check_visibility(js: dict, cams, n: int, data_root: Path,
         rep.add(PASS, scope, "visibility annotations agree with the semantic maps frame by frame")
 
 
+# ---------------------------------------------------------------- 可见性总览
+def visibility_summary(scene_files, root: Path) -> int:
+    """扫全部场景，统计 context 帧的球可见性分布。
+
+    抽查几个场景只能告诉你"有这个问题"，告诉不了你"这个问题有多大"。
+    决定一份数据能不能用，看的是分布：偶发的几帧缺失可以接受，
+    过半场景 frame15 只剩一个视图看得到球，那落点精度就有个数据层面的天花板。
+    """
+    per_cell: dict[tuple[int, str], int] = {}
+    all_blind: dict[int, int] = {f: 0 for f in CONTEXT_FRAMES}
+    n_scene = 0
+    n_any_bad = 0
+    cams_seen: list[str] = []
+    unreadable = 0
+
+    for p in scene_files:
+        try:
+            js = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:                                     # noqa: BLE001
+            unreadable += 1
+            continue
+        n = js.get("num_timesteps")
+        cams = js.get("camera_list") or list(js.get("camera_to_world", {}).keys())
+        if not isinstance(n, int) or not cams:
+            unreadable += 1
+            continue
+        if not cams_seen:
+            cams_seen = list(cams)
+        mask_by_cam = js.get("ball_visible_mask_by_camera")
+        frames_by_cam = js.get("ball_visible_frames_by_camera")
+        vis: dict[str, list[bool]] = {}
+        for cam in cams:
+            if mask_by_cam and cam in mask_by_cam:
+                vis[cam] = [bool(x) for x in mask_by_cam[cam]]
+            elif frames_by_cam and cam in frames_by_cam:
+                sset = set(int(x) for x in frames_by_cam[cam])
+                vis[cam] = [i in sset for i in range(n)]
+            else:
+                vis = {}
+                break
+        if not vis or any(len(v) < max(CONTEXT_FRAMES) + 1 for v in vis.values()):
+            unreadable += 1
+            continue
+
+        n_scene += 1
+        bad_here = False
+        for f in CONTEXT_FRAMES:
+            blind_cams = [c for c in cams if not vis[c][f]]
+            for c in blind_cams:
+                per_cell[(f, c)] = per_cell.get((f, c), 0) + 1
+            if blind_cams:
+                bad_here = True
+            if len(blind_cams) == len(cams):
+                all_blind[f] += 1
+        if bad_here:
+            n_any_bad += 1
+
+    print("=" * 72)
+    print("Context-frame ball visibility summary")
+    print("=" * 72)
+    if unreadable:
+        print(f"skipped {unreadable} scene(s) that could not be parsed")
+    if not n_scene:
+        print("no usable scenes")
+        return 2
+    print(f"scenes scanned: {n_scene}")
+    print("")
+    print("Counts below = scenes where that camera CANNOT see the ball at that frame.")
+    print("")
+    w = max(11, max((len(c) for c in cams_seen), default=11))
+    head = "frame | " + "  ".join(f"{c:>{w}}" for c in cams_seen) + " | all-blind"
+    print(head)
+    print("-" * len(head))
+    for f in CONTEXT_FRAMES:
+        cells = "  ".join(f"{per_cell.get((f, c), 0):>{w}}" for c in cams_seen)
+        star = "  <- terminal frame" if f == TERMINAL_FRAME else ""
+        print(f"{f:>5} | {cells} | {all_blind[f]:>9}{star}")
+    print("-" * len(head))
+    print("")
+    pct = 100.0 * n_any_bad / n_scene
+    print(f"scenes with at least one blind context cell : {n_any_bad}/{n_scene} ({pct:.1f}%)")
+    worst = max(all_blind.values())
+    if worst:
+        bad_frames = {f: c for f, c in all_blind.items() if c}
+        print(f"scenes where NO view sees the ball        : {bad_frames}")
+        print("")
+        print("Those are unrecoverable: with every view blind, nothing can localize the ball")
+        print("at that frame. If frame 15 is in that list, the landing prediction for those")
+        print("scenes has no anchor and they are pure noise in the frame24 metric.")
+    else:
+        print("no scene is blind in every view at a context frame (at least one view always sees it)")
+    print("")
+    print("How to read this:")
+    print("  Training does not break -- it reads ball_mask per pixel behind an .any() guard,")
+    print("  and the trajectory targets come from ball_trajectory, independent of visibility.")
+    print("  What shrinks is inference: the pixel path back-projects one ray per seeing view,")
+    print("  so fewer views means a weaker depth estimate, and depth is already ~95% of the")
+    print("  frame24 error. Compare the frame15 row against the 6.5cm data before reading any")
+    print("  regression on this dataset as a model problem.")
+    print("=" * 72)
+    return 0
+
+
 # ---------------------------------------------------------------- main
 def main() -> int:
     ap = argparse.ArgumentParser(
@@ -458,6 +579,9 @@ def main() -> int:
                     help="skip the semantic map check (faster, but misses visibility mismatches)")
     ap.add_argument("--show-pass", action="store_true",
                     help="also print the checks that passed")
+    ap.add_argument("--visibility-summary", action="store_true",
+                    help="scan every scene and report how context-frame ball visibility is "
+                         "distributed, instead of running the per-scene contract checks")
     ap.add_argument("--json-only", action="store_true",
                     help="JSON contract checks only, without importing constants.py "
                          "(no torch/numpy needed)")
@@ -487,6 +611,10 @@ def main() -> int:
     if not scene_files:
         print(f"[FAIL] scene_list is empty: {[str(p) for p in ann_files]}")
         return 2
+
+    if args.visibility_summary:
+        # 统计模式看的是分布，抽样没有意义，永远跑全量
+        return visibility_summary(scene_files, root)
 
     picked = scene_files if args.limit <= 0 else scene_files[:args.limit]
 
