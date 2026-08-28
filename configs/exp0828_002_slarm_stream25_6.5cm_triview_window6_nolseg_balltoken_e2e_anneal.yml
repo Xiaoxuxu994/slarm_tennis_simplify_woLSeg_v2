@@ -1,0 +1,134 @@
+# 6.5cm ball token · B 组（退火版）：放开 backbone，端到端训练
+#
+# 与 A 组（exp0828_001）的区别是 ball_token_freeze_backbone: false 及随之调整的 LR。
+# 起点、判据、误差结构见 A 组 config 抬头。
+#
+# ─────────────────────────────────────────────────────────────
+# 退火之后，这组的定位变了 —— 变难了，也变得更值得跑：
+#
+#   退火前：backbone 在盆地里乱弹，"放开它让它再学点东西"是有空间的。
+#   退火后：backbone 刚在 lr=1e-6 上落定，是一个真正收敛的点。
+#           再动它，默认结果是**变坏**，不是变好。
+#
+#   所以本组现在问的是一个很尖锐的问题：
+#   已经收敛的 backbone，会不会为了"球定位"这个新目标，愿意离开当前的极小值？
+#   只有当球监督提供了重建损失里没有的信息时，答案才是肯定的。
+#
+#   而这恰恰有理由成立：误差 95.5% 在深度方向，深度是 backbone 的活，
+#   ball head 补不了。A 组若只小赢或不赢，唯一的出路就是这里。
+# ─────────────────────────────────────────────────────────────
+#
+# LR 为什么比 exp0827_002 又降了一档（3e-5/3e-6 → 1e-5/1e-6）：
+#
+#   exp0827_002 的 3e-5 是相对 stage1 constant 1e-4 的 30%，那时的 backbone 本来就在抖，
+#   多抖一点无所谓。现在起点是退火落定的收敛点，退火那 6k 步换来了 33% 的改善，
+#   用 3e-5 去动它，第一件事就是把这 33% 冲掉。
+#
+#   矛盾仍然在（make_stream25_param_groups 只分 trunk/head 两组，
+#   ball_query/ball_block/ball_head 被归进 head，与 gaussian head、语义头共用 args.lr，
+#   没法只给 ball token 开大），所以 1e-5 对随机初始化的 ball token 是偏慢的。
+#   这是刻意的取舍：宁可 ball token 学慢，也不能赔掉退火成果。
+#
+#   若跑下来 ball token 收敛太慢，不要调大这里的 LR，改走两阶段：
+#   用 exp0828_001 的产物做 load_from，那时 ball token 已训好，端到端只需小 LR 联合微调。
+#
+# lr_sched 同样是 cosine：constant 正是把 stage1 弄抖的配置，端到端阶段更不能重蹈覆辙。
+#
+# 必须盯的指标（比 A 组多）：
+#   A 组冻结，dense loss 无梯度，只看 ball_pos_l2_m 就够；
+#   B 组所有 loss 都在改参数，必须同时盯 stream25_rgb_raw / depth_relative_raw /
+#   semantic_raw。ball loss 在降而这些在涨 = 球监督正在拖垮重建，
+#   那时应降低 stream25_ball_pos_weight 或退回两阶段方案。
+#   另外中途用 verify 看一眼 pred 那一路有没有比 0.0235 变差 —— 那是退火成果在流失的直接信号。
+model: slarm
+dataset: [ball_catch_6.5cm_triview]
+data_root: data/SLARM_data_6.5
+
+input_size: [320, 240]
+patch_size: 8
+embed_dim: 768
+depth: 12
+patch_embed: conv
+num_max_cameras: 3
+num_context_timesteps: 6
+num_target_timesteps: 7
+context_stride: 3
+timespan: 0.8
+mode: window_6
+
+use_affine_token: true
+use_sky_token: true
+use_ms3_motion: true
+use_last_token: true
+shortcut_rgb: true
+add_patch_plucker_embed: true
+sigmoid_rgb: true
+num_motion_tokens: 0
+
+strict_data_loading: true
+enable_task_semantic_head: true
+terminal_context_extrapolation: true
+stream25_render_target_chunk_size: 7
+stream25_reconstruction_loss: true
+
+# ---- ball token ----
+use_ball_token: true
+ball_token_freeze_backbone: false     # ★ B 组：放开。全部参数参与训练
+stream25_ball_pos_weight: 1.0
+stream25_ball_vel_weight: 1.0
+# 端到端下这两个权重会把梯度送回 backbone。若重建指标退化，先降这里再考虑降 LR。
+
+# ---- 损失权重：与 exp0825_002 / exp0827_003 / A 组完全一致 ----
+stream25_rgb_weight: 1.00
+stream25_lpips_weight: 0.05
+stream25_ball_rgb_weight: 0.50
+stream25_depth_relative_weight: 1.00
+stream25_ball_depth_metric_weight: 0.5
+stream25_semantic_weight: 1.00
+stream25_ms3_ball_weight: 1.00
+stream25_ms3_static_weight: 0.25
+stream25_opacity_weight: 0.10
+
+stream25_ms3_velocity_scale: 5.0
+stream25_ms3_acceleration_scale: 9.81
+stream25_ms3_jerk_scale: 1.0
+terminal_dynamic_velocity_threshold: 1.0
+stream25_semantic_class_weight_cap: 10.0
+
+# ---- 无 LSeg ----
+online_feat: false
+enable_feat_loss: false
+feat_loss_coeff: 0.0
+stream25_lseg_feature_weight: 0.0
+enable_depth_loss: true
+enable_sky_opacity_loss: true
+enable_perceptual_loss: true
+perceptual_weight: 0.05
+perceptual_loss_start_iter: 0
+load_depth: true
+
+# ---- 优化：起点是收敛点，LR 必须比 exp0827_002 再低一档 ----
+lr: 1.0e-5                   # exp0827_002 的 1/3；退火成果是这次最该保护的资产
+stream25_trunk_lr: 1.0e-6    # 保持 10:1，backbone 改得最慢
+lr_sched: cosine             # ★ 与 A 组一致；constant 是把 stage1 弄抖的元凶
+min_lr: 1.0e-7
+warmup_iters: 1000           # 随机初始化的 ball token 初期梯度很大，warmup 保护 backbone
+batch_size: 1
+seed: 20260828               # ★ 与 A 组同 seed：ball_query 初始值相同，两组可比
+
+# ★ 与 A 组同一个起点：exp0827_003 退火终点
+load_from: work_dirs/slarm/exp0827_003_slarm_stream25_6.5cm_triview_window6_nolseg_anneal/checkpoints/ckpt_005999.pth
+#
+# 两阶段方案（若 A 组证明 ball token 有效、而本组收敛慢时改用）：
+# load_from: work_dirs/slarm/exp0828_001_slarm_stream25_6.5cm_triview_window6_nolseg_balltoken_frozen_anneal/checkpoints/ckpt_009999.pth
+
+train_annotation: scene_list/ball_catch_6.5cm_triview_train.txt
+eval_annotation: scene_list/ball_catch_6.5cm_triview_validation.txt
+num_iterations: 15000        # cosine 按这个长度铺开；中途改它会让 LR 曲线跳变
+ckpt_every_n_iters: 1000
+vis_every_n_iters: 2000
+num_vis_samples: 1
+eval_every_n_iters: 50000
+keep_n_ckpts: 15
+project: slarm
+exp_name: exp0828_002_slarm_stream25_6.5cm_triview_window6_nolseg_balltoken_e2e_anneal

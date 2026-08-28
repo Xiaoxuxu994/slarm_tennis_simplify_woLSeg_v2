@@ -15,17 +15,28 @@ RESUME=0
 
 # ---- 6.5cm 实验组（起点统一为 exp0825_002 的 ckpt_039999）----
 #
-# 基线是一条带不是一个数：verify_sweep 扫 5 个 stage1 ckpt，pos15 median
-#   029999 0.0312 / 033999 0.0353 / 035999 0.1106 / 037999 0.0623 / 039999 0.0364
-# 摆动 3.5×（constant LR 40k、无衰减无 EMA）。要算赢，得稳定低于下沿 0.0312。
+# 基线（8/27 退火之后，exp0827_003 的 ckpt_005999）：pos15 0.0235 / p95 0.0428 / f24 0.0246。
+# 在此之前 stage1 是 constant LR 跑到底，pos15 在 0.031~0.111 之间摆动 3.5×，没有收敛点；
+# 补 6k 步 cosine（1e-4 → 1e-6）之后落定，median 改善 33%、p95 改善 50%。
+#
+# ★ 由此得到的通用教训：constant LR 跑到底的训练，末点 ckpt 只是盆地里的一次采样。
+#   此后每一组训练都该带 LR 衰减，不只是 backbone —— ball token 那种新模块同样适用。
+#
 # 另已知：误差 95.5% 在深度方向，语义选球不是瓶颈（pred≈gt mask）。细节见各 config 抬头。
 #
-# 退火：先把 stage1 的抖动摁下去 —— 最便宜、也最该先跑的一组
+# ── 当前这一轮（8/28，起点统一为退火终点 exp0827_003 的 ckpt_005999）──
+# A 组：冻结 backbone，只训 ball token —— 在一个**已经很好**的 backbone 上还有没有增量
+# CONFIG="configs/exp0828_001_slarm_stream25_6.5cm_triview_window6_nolseg_balltoken_frozen_anneal.yml"
+# B 组：放开 backbone 端到端 —— 收敛的 backbone 会不会为球定位离开当前极小值
+#      深度是 backbone 的活，A 组若只小赢，希望就在这组；盯 rgb/depth/semantic 别塌
+# CONFIG="configs/exp0828_002_slarm_stream25_6.5cm_triview_window6_nolseg_balltoken_e2e_anneal.yml"
+#
+# ── 已完成 / 已作废 ──
+# 退火（已跑完，结论见下）：6k 步 cosine，pos15 0.0312 → 0.0235，p95 0.0863 → 0.0428
 # CONFIG="configs/exp0827_003_slarm_stream25_6.5cm_triview_window6_nolseg_anneal.yml"
-# A 组：冻结 backbone，只训 ball token —— 回答「现有表征里的球信息够不够读出来」
+# 下面两组起点是 stage1 的 029999（已被退火终点取代），且 lr_sched 是 constant
+# （正是把 stage1 弄抖的配置）。exp0827_001 可留着跑完当对照，exp0827_002 建议停掉。
 # CONFIG="configs/exp0827_001_slarm_stream25_6.5cm_triview_window6_nolseg_balltoken_frozen.yml"
-# B 组：放开 backbone 端到端 —— 回答「backbone 能不能为球定位再学一点深度」
-#      深度是 backbone 的活，A 组若只小赢，希望反而在这组；代价是可能赔上重建，盯 rgb/depth/semantic
 # CONFIG="configs/exp0827_002_slarm_stream25_6.5cm_triview_window6_nolseg_balltoken_e2e.yml"
 #
 # 三组互相无依赖，可并行；3 组 × 2 卡的排法：

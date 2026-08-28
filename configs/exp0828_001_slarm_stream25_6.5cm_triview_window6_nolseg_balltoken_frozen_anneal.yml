@@ -1,0 +1,136 @@
+# 6.5cm ball token · A 组（退火版）：冻结 backbone，只训 ball token
+#
+# 与 exp0827_001 的区别只有两处，但两处都是 8/27 退火实验逼出来的：
+#   1. 起点换成退火终点 ckpt_005999，不再是 stage1 的 029999；
+#   2. lr_sched: constant → cosine。
+#
+# ─────────────────────────────────────────────────────────────
+# 为什么必须换起点（exp0827_003 的结果）：
+#
+#   stage1 用 constant lr=1e-4 跑满 40k、无衰减无 EMA，pos15 在 0.031~0.111 之间摆动 3.5×，
+#   三个指标各指向不同 ckpt —— 每个存档只是盆地里的一次采样。
+#   补上 6k 步 cosine 退火（1e-4 → 1e-6）之后：
+#       000999 0.0521   001999 0.0537   002999 0.0843
+#       003999 0.0208   004999 0.0242   005999 0.0235   ← LR 跌破 5e-5 后落定
+#   末三点相邻变化 16%/3%，且 v15、p95、f24 同时在末段最优 —— 真收敛，不是采样。
+#
+#   相对 stage1 最好的那个点（029999，0.0312）：median 改善 33%，p95 改善 50%
+#   （0.0863 → 0.0428）。p95 改善更大，说明尾部的坏场景被修好了。
+#
+#   所以 029999 这个起点已经作废：在它上面赢下 0.0312，只是赢了一个被淘汰的对手。
+#   本组要回答的是更难也更有意义的问题：**在一个已经很好的 backbone 上，ball token 还有没有增量。**
+#
+# 为什么必须换成 cosine：
+#   exp0827_001 用的是 constant，那正是把 stage1 弄抖的同一个配置。
+#   ball token 是随机初始化的新模块，constant 1e-4 训 10k 步，末点 ckpt 会重蹈覆辙 ——
+#   同样是盆地采样，同样会抖 2~3×，同样说不清赢了多少。
+#   这个教训适用于此后每一组训练，不只是 backbone。
+# ─────────────────────────────────────────────────────────────
+#
+# 判据：
+#   verify 的对比是配对的 —— 同一次运行里同时报 pred（像素法）和 balltoken 两路，
+#   同一批 40 场景、同一组权重。看的是"同一 ckpt 上两条读出路径谁更准"。
+#   本组起点上像素法是 pos15 0.0235 / p95 0.0428（退火 005999 的成绩），
+#   冻结训练下这个数不会变，所以它就是全程的对照线。
+#
+#   ball token 要证明自己，必须稳定低于 0.0235。这比 exp0827_001 的 0.0312 难得多，
+#   但那才是真问题：退火已经免费拿走 33%，ball token 得在这之上还有东西。
+#
+#   训练中直接看 stream25_ball_pos_l2_m（单位米）。6.5cm 球径 0.065 m。
+#
+# 已知的误差结构（8/26 verify）：误差 95.5% 在沿射线方向（深度），横向只占 4.5%；
+#   语义选球不是瓶颈（pred mask ≈ gt mask）。ball token 的卖点因此是绕开 depth 反投影、
+#   并在 attention 里联合三个视角，而不是"绕开语义头"。
+model: slarm
+dataset: [ball_catch_6.5cm_triview]
+data_root: data/SLARM_data_6.5
+
+input_size: [320, 240]
+patch_size: 8
+embed_dim: 768
+depth: 12
+patch_embed: conv
+num_max_cameras: 3
+num_context_timesteps: 6
+num_target_timesteps: 7
+context_stride: 3
+timespan: 0.8
+mode: window_6
+
+use_affine_token: true
+use_sky_token: true
+use_ms3_motion: true
+use_last_token: true
+shortcut_rgb: true
+add_patch_plucker_embed: true
+sigmoid_rgb: true
+num_motion_tokens: 0
+
+strict_data_loading: true
+enable_task_semantic_head: true
+terminal_context_extrapolation: true
+stream25_render_target_chunk_size: 7
+stream25_reconstruction_loss: true
+
+# ---- ball token（本实验主角）----
+use_ball_token: true
+ball_token_freeze_backbone: true      # ★ A 组：冻结。只有 ball_query/ball_block/ball_head 有梯度
+stream25_ball_pos_weight: 1.0
+stream25_ball_vel_weight: 1.0
+# 备注：24cm 上实测 ball_vel15_error≈0.176 m/s，乘 dt≈0.3 后对 frame24 的贡献
+# 与 pos15 误差量级相当。若 pos 已收敛而 frame24 仍偏大，可把 vel 权重提到 2.0 再试。
+
+# ---- 损失权重：与 exp0825_002 / exp0827_003 完全一致 ----
+# 冻结下 dense head 无梯度，这些项照算但不影响参数；保持一致是为了日志可直接横比。
+stream25_rgb_weight: 1.00
+stream25_lpips_weight: 0.05
+stream25_ball_rgb_weight: 0.50
+stream25_depth_relative_weight: 1.00
+stream25_ball_depth_metric_weight: 0.5
+stream25_semantic_weight: 1.00
+stream25_ms3_ball_weight: 1.00
+stream25_ms3_static_weight: 0.25
+stream25_opacity_weight: 0.10
+
+stream25_ms3_velocity_scale: 5.0
+stream25_ms3_acceleration_scale: 9.81
+stream25_ms3_jerk_scale: 1.0
+terminal_dynamic_velocity_threshold: 1.0
+stream25_semantic_class_weight_cap: 10.0
+
+# ---- 无 LSeg ----
+online_feat: false
+enable_feat_loss: false
+feat_loss_coeff: 0.0
+stream25_lseg_feature_weight: 0.0
+enable_depth_loss: true
+enable_sky_opacity_loss: true
+enable_perceptual_loss: true
+perceptual_weight: 0.05
+perceptual_loss_start_iter: 0
+load_depth: true
+
+# ---- 优化：只训新初始化的 ball token，但这次带衰减 ----
+lr: 1.0e-4                   # ball token 是随机初始化的新模块，需要正常量级的 LR
+stream25_trunk_lr: 2e-5      # 冻结下 trunk 无参数进组，此值无实际作用（保留仅为与 B 组对齐）
+lr_sched: cosine             # ★ 相对 exp0827_001 的改动之二：constant → cosine
+min_lr: 1.0e-6               # 末段落定，避免末点 ckpt 又变成一次盆地采样
+warmup_iters: 500            # 只训 ball token，收敛快，短 warmup 足够
+batch_size: 1
+seed: 20260828
+
+# ★ 起点：exp0827_003 退火终点（cosine 走完、已落定的收敛点）
+#   不选 median 最好的 003999（0.0208）：它与 005999 差 16%，在这个已稳定的区间里属噪声；
+#   005999 是收敛点而非采样点，且 v15（0.0557）和 f24（0.0246）都是它最好。
+load_from: work_dirs/slarm/exp0827_003_slarm_stream25_6.5cm_triview_window6_nolseg_anneal/checkpoints/ckpt_005999.pth
+
+train_annotation: scene_list/ball_catch_6.5cm_triview_train.txt
+eval_annotation: scene_list/ball_catch_6.5cm_triview_validation.txt
+num_iterations: 10000        # 冻结只训 ball token，10k 足够；cosine 按这个长度铺开
+ckpt_every_n_iters: 1000
+vis_every_n_iters: 2000
+num_vis_samples: 1
+eval_every_n_iters: 50000
+keep_n_ckpts: 10
+project: slarm
+exp_name: exp0828_001_slarm_stream25_6.5cm_triview_window6_nolseg_balltoken_frozen_anneal

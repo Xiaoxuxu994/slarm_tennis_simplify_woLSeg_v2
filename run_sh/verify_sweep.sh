@@ -168,6 +168,11 @@ for it, g in rows:
 print(sep)
 
 # 趋势判读：只在有 3 个以上点、且 pos15 都拿到时给（pos15 越小越好）
+#
+# 先判"末段有没有落定"，再谈别的。这个顺序很重要：
+# 带 LR 衰减的训练末段会稳下来，此时末点是收敛点，而 argmin 只是稳定区间里的
+# 一次小波动；反过来在 constant LR 下没有收敛点，每个存档都是采样。
+# 两种情况给的建议正好相反，所以必须先分清楚是哪一种。
 vals = [(it, g["pos15"][0]) for it, g in rows if "pos15" in g]
 if len(vals) >= 3:
     first, last = vals[0][1], vals[-1][1]
@@ -178,28 +183,43 @@ if len(vals) >= 3:
           f"{verb} {abs(change):.1f}%")
     print(f"相邻下降的段数：{drops}/{len(vals)-1}")
 
-    # 异常点：与左右邻居均值偏离超过 50%，多半是训练抖动而非趋势
-    outliers = []
-    for i in range(1, len(vals) - 1):
-        neighbour = (vals[i - 1][1] + vals[i + 1][1]) / 2
-        if neighbour > 0 and vals[i][1] > neighbour * 1.5:
-            outliers.append((vals[i][0], vals[i][1], neighbour))
-    for it_o, v_o, nb in outliers:
-        print(f"[!] {it_o} = {v_o:.4f}，而左右邻居均值只有 {nb:.4f}（高 {v_o/nb:.1f}×）"
-              f" —— 多半是训练抖动，不要拿它当趋势的一部分解读")
+    # 末段落定判据：最后三点两两相对变化都 <20%
+    tail3 = vals[-3:]
+    rel = [abs(b[1] - a[1]) / a[1] for a, b in zip(tail3, tail3[1:]) if a[1] > 0]
+    settled = len(rel) == 2 and max(rel) < 0.20
+    tail_mean = sum(v for _, v in tail3) / len(tail3)
 
-    clean = [v for v in vals if v[0] not in {o[0] for o in outliers}]
-    tail = clean if len(clean) >= 3 else vals
-    tail_drops = sum(1 for a, b in zip(tail, tail[1:]) if b[1] < a[1])
-    if tail_drops == len(tail) - 1:
-        print("→ 剔除异常点后单调下降：尚未收敛，继续训 stage1 的收益可能高于架构改动")
-    elif tail[-1][1] <= min(v for _, v in tail):
-        print("→ 末点是（剔除异常点后的）全程最优，且中间有小幅反弹：接近收敛，"
-              "剩余波动来自训练噪声")
+    if settled:
+        print(f"\n→ 末段已落定：{tail3[0][0]}/{tail3[1][0]}/{tail3[2][0]} = "
+              f"{tail3[0][1]:.4f}/{tail3[1][1]:.4f}/{tail3[2][1]:.4f}"
+              f"（相邻变化 {rel[0]*100:.0f}% / {rel[1]*100:.0f}%），"
+              f"代表值取末段均值 {tail_mean:.4f}")
+        print(f"   后续实验用末点 {vals[-1][0]} 作起点。不要按 argmin 挑 —— "
+              f"落定区间内部的高低是噪声，挑最小值是在向这 40 个场景过拟合。")
+        # 落定之前若明显更差，多半是 LR 还高；这不是异常点，是两个不同的阶段
+        head = [v for v in vals[:-3]]
+        if head and min(v for _, v in head) > tail_mean * 1.3:
+            print(f"   落定前那几点（最好 {min(v for _, v in head):.4f}）明显更差："
+                  f"这是阶段差异不是异常点，别把它们和末段混在一起算趋势。")
     else:
-        best = min(tail, key=lambda x: x[1])
-        print(f"→ 最优在 {best[0]}（{best[1]:.4f}）而非末点：曲线已平，末点未必最好；"
-              f"后续实验建议用 {best[0]} 作为起点")
+        # 未落定：每个存档都是采样，此时才需要异常点检测和 argmin 讨论
+        outliers = []
+        for i in range(1, len(vals) - 1):
+            neighbour = (vals[i - 1][1] + vals[i + 1][1]) / 2
+            if neighbour > 0 and vals[i][1] > neighbour * 1.5:
+                outliers.append((vals[i][0], vals[i][1], neighbour))
+        for it_o, v_o, nb in outliers:
+            print(f"[!] {it_o} = {v_o:.4f}，而左右邻居均值只有 {nb:.4f}（高 {v_o/nb:.1f}×）"
+                  f" —— 多半是训练抖动，不要拿它当趋势的一部分解读")
+
+        lo, hi = min(v for _, v in vals), max(v for _, v in vals)
+        print(f"\n→ 末段未落定（最后三点相邻变化 "
+              f"{'/'.join(f'{r*100:.0f}%' for r in rel) if rel else 'n/a'}，超过 20%）："
+              f"这条曲线上没有收敛点，每个存档都只是盆地里的一次采样。")
+        print(f"   基线应记成一条带 {lo:.4f}~{hi:.4f}（{hi/lo:.1f}×），不是任何单个数。")
+        print(f"   八成是 constant LR 跑到底、无衰减无 EMA 造成的 —— "
+              f"补一段 cosine 退火通常能把它摁下去（见 configs/exp0827_003 的做法），"
+              f"那比任何架构改动都便宜。")
 
 md = out_dir / "summary.md"
 md.write_text("\n".join(lines_md) + "\n", encoding="utf-8")
