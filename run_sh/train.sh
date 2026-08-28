@@ -71,7 +71,7 @@ if [ "${RESUME}" = "1" ]; then
     # 那种情况下别用 auto，直接写死：bash run_sh/train.sh --resume_from <ckpt路径>
     # （命令行参数在 EXTRA_ARGS 之后透传，resume_from 优先级高于 auto_resume）
     EXTRA_ARGS+=(--auto_resume)
-    echo "[resume] 从最新 ckpt 续训（config 里的 load_from 会被忽略）"
+    echo "[resume] resuming from the newest checkpoint (load_from in the config is ignored)"
 fi
 
 if [ "${DEVICE_NUM}" -gt 1 ]; then

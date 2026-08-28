@@ -35,8 +35,8 @@ SPLIT="validation"
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-[ -f "${CONFIG}" ] || { echo "config 不存在: ${CONFIG}"; exit 1; }
-[ -d "${CKPT_DIR}" ] || { echo "ckpt 目录不存在: ${CKPT_DIR}"; exit 1; }
+[ -f "${CONFIG}" ] || { echo "config not found: ${CONFIG}"; exit 1; }
+[ -d "${CKPT_DIR}" ] || { echo "checkpoint dir not found: ${CKPT_DIR}"; exit 1; }
 
 # 命令行参数优先于上面的 ITERS
 if [ "$#" -gt 0 ]; then
@@ -46,22 +46,22 @@ fi
 if [ "${ITERS}" = "auto" ]; then
     ITERS="$(ls "${CKPT_DIR}"/ckpt_*.pth 2>/dev/null \
              | sed 's#.*/ckpt_##; s#\.pth##' | grep -E '^[0-9]+$' | sort -n | tr '\n' ' ')"
-    [ -n "${ITERS}" ] || { echo "在 ${CKPT_DIR} 下没找到 ckpt_*.pth"; exit 1; }
-    echo "auto 发现 $(echo ${ITERS} | wc -w) 个 ckpt"
+    [ -n "${ITERS}" ] || { echo "no ckpt_*.pth under ${CKPT_DIR}"; exit 1; }
+    echo "auto-discovered $(echo ${ITERS} | wc -w) checkpoints"
 fi
 
 EXP_NAME="$(basename "${CKPT_DIR%/checkpoints}")"
 OUT_DIR="work_dirs/slarm/verify_sweep/${EXP_NAME}"
 mkdir -p "${OUT_DIR}"
 
-echo "════════════════════════════════════════════════════════"
+echo "========================================================"
 echo "config : ${CONFIG}"
 echo "ckpts  : ${CKPT_DIR}"
 echo "iters  : ${ITERS}"
 echo "limit  : ${LIMIT}   mask_source: ${MASK_SOURCE}   split: ${SPLIT}"
 echo "out    : ${OUT_DIR}"
 echo "GPU    : ${GPU}"
-echo "════════════════════════════════════════════════════════"
+echo "========================================================"
 echo ""
 
 DONE_LIST=""
@@ -70,11 +70,11 @@ for it in ${ITERS}; do
     LOG="${OUT_DIR}/verify_${it}.log"
 
     if [ ! -f "${CKPT}" ]; then
-        echo "[skip] ckpt_${it}.pth 不存在"
+        echo "[skip] ckpt_${it}.pth not found"
         continue
     fi
 
-    echo "──────── ckpt_${it} ────────"
+    echo "-------- ckpt_${it} --------"
     START=$(date +%s)
 
     CUDA_VISIBLE_DEVICES="${GPU}" SLARM_SINGLE_PROCESS=1 \
@@ -91,18 +91,18 @@ for it in ${ITERS}; do
     ELAPSED=$(( $(date +%s) - START ))
 
     if [ ${RC} -ne 0 ]; then
-        echo "  失败（退出码 ${RC}），最后几行："
+        echo "  FAILED (exit ${RC}), last lines:"
         tail -5 "${LOG}" | sed 's/^/    /'
         continue
     fi
 
-    echo "  完成，用时 ${ELAPSED}s  ->  ${LOG}"
+    echo "  done in ${ELAPSED}s  ->  ${LOG}"
     grep -E "pos15_error|phys\(gravity\)" "${LOG}" | sed 's/^/    /'
     DONE_LIST="${DONE_LIST} ${it}"
 done
 
 echo ""
-echo "════════════════════════════════════════════════════════"
+echo "========================================================"
 
 python3 - "${OUT_DIR}" ${DONE_LIST} <<'PY'
 """把各 ckpt 的 verify 日志解析成一张对比表。
@@ -118,7 +118,7 @@ import re, sys, pathlib
 out_dir = pathlib.Path(sys.argv[1])
 iters = sys.argv[2:]
 if not iters:
-    print("没有成功完成的 ckpt，无法汇总")
+    print("no checkpoint completed successfully, nothing to summarize")
     raise SystemExit(0)
 
 WANT = [
@@ -150,7 +150,7 @@ for it in iters:
         rows.append((it, parse(p)))
 
 if not rows:
-    print("日志都解析不出数字，检查 verify 输出格式是否变了")
+    print("could not parse numbers from any log; check whether the verify output format changed")
     raise SystemExit(0)
 
 hdr = f"{'ckpt':>9} | {'pos15 med':>10} {'pos15 p95':>10} | {'v15 med':>9} | {'f24 med':>9} {'f24 p95':>9}"
@@ -160,71 +160,70 @@ lines_md = ["| ckpt | pos15 med | pos15 p95 | v15 med | frame24 med | frame24 p9
             "| --- | ---: | ---: | ---: | ---: | ---: |"]
 for it, g in rows:
     def f(key, idx):
-        return f"{g[key][idx]:.4f}" if key in g else "—"
+        return f"{g[key][idx]:.4f}" if key in g else "-"
     print(f"{it:>9} | {f('pos15',0):>10} {f('pos15',1):>10} | {f('v15',0):>9} |"
           f" {f('frame24_phys',0):>9} {f('frame24_phys',1):>9}")
     lines_md.append(f"| {it} | {f('pos15',0)} | {f('pos15',1)} | {f('v15',0)} "
                     f"| {f('frame24_phys',0)} | {f('frame24_phys',1)} |")
 print(sep)
 
-# 趋势判读：只在有 3 个以上点、且 pos15 都拿到时给（pos15 越小越好）
-#
-# 先判"末段有没有落定"，再谈别的。这个顺序很重要：
-# 带 LR 衰减的训练末段会稳下来，此时末点是收敛点，而 argmin 只是稳定区间里的
-# 一次小波动；反过来在 constant LR 下没有收敛点，每个存档都是采样。
-# 两种情况给的建议正好相反，所以必须先分清楚是哪一种。
+# 趋势判读：先判"末段有没有落定"，再谈别的。这个顺序很重要 ——
+# 带 LR 衰减的训练末段会稳下来，此时末点是收敛点，而 argmin 只是稳定区间里的一次
+# 小波动；constant LR 下则没有收敛点，每个存档都是采样。两种情况建议正好相反。
 vals = [(it, g["pos15"][0]) for it, g in rows if "pos15" in g]
 if len(vals) >= 3:
     first, last = vals[0][1], vals[-1][1]
     drops = sum(1 for a, b in zip(vals, vals[1:]) if b[1] < a[1])
     change = (1 - last / first) * 100
-    verb = "改善" if change > 0 else "退化"
-    print(f"\n首 {vals[0][0]} = {first:.4f}   末 {vals[-1][0]} = {last:.4f}   "
-          f"{verb} {abs(change):.1f}%")
-    print(f"相邻下降的段数：{drops}/{len(vals)-1}")
+    verb = "better" if change > 0 else "worse"
+    print(f"\nfirst {vals[0][0]} = {first:.4f}   last {vals[-1][0]} = {last:.4f}   "
+          f"{abs(change):.1f}% {verb}")
+    print(f"segments that went down: {drops}/{len(vals)-1}")
 
-    # 末段落定判据：最后三点两两相对变化都 <20%
     tail3 = vals[-3:]
     rel = [abs(b[1] - a[1]) / a[1] for a, b in zip(tail3, tail3[1:]) if a[1] > 0]
     settled = len(rel) == 2 and max(rel) < 0.20
     tail_mean = sum(v for _, v in tail3) / len(tail3)
 
     if settled:
-        print(f"\n→ 末段已落定：{tail3[0][0]}/{tail3[1][0]}/{tail3[2][0]} = "
-              f"{tail3[0][1]:.4f}/{tail3[1][1]:.4f}/{tail3[2][1]:.4f}"
-              f"（相邻变化 {rel[0]*100:.0f}% / {rel[1]*100:.0f}%），"
-              f"代表值取末段均值 {tail_mean:.4f}")
-        print(f"   后续实验用末点 {vals[-1][0]} 作起点。不要按 argmin 挑 —— "
-              f"落定区间内部的高低是噪声，挑最小值是在向这 40 个场景过拟合。")
-        # 落定之前若明显更差，多半是 LR 还高；这不是异常点，是两个不同的阶段
+        print(f"\n-> SETTLED. Last three ({tail3[0][0]}/{tail3[1][0]}/{tail3[2][0]}) = "
+              f"{tail3[0][1]:.4f}/{tail3[1][1]:.4f}/{tail3[2][1]:.4f}, "
+              f"adjacent change {rel[0]*100:.0f}% / {rel[1]*100:.0f}%. "
+              f"Representative value = tail mean {tail_mean:.4f}")
+        print(f"   Use the LAST checkpoint ({vals[-1][0]}) as the next starting point. Do not "
+              f"pick the argmin: within a settled range the ups and downs are noise, and "
+              f"taking the minimum overfits to these eval scenes.")
         head = [v for v in vals[:-3]]
         if head and min(v for _, v in head) > tail_mean * 1.3:
-            print(f"   落定前那几点（最好 {min(v for _, v in head):.4f}）明显更差："
-                  f"这是阶段差异不是异常点，别把它们和末段混在一起算趋势。")
+            print(f"   The points before settling (best {min(v for _, v in head):.4f}) are much "
+                  f"worse. That is a phase difference, not an outlier - do not average them "
+                  f"into the trend.")
     else:
-        # 未落定：每个存档都是采样，此时才需要异常点检测和 argmin 讨论
         outliers = []
         for i in range(1, len(vals) - 1):
             neighbour = (vals[i - 1][1] + vals[i + 1][1]) / 2
             if neighbour > 0 and vals[i][1] > neighbour * 1.5:
                 outliers.append((vals[i][0], vals[i][1], neighbour))
         for it_o, v_o, nb in outliers:
-            print(f"[!] {it_o} = {v_o:.4f}，而左右邻居均值只有 {nb:.4f}（高 {v_o/nb:.1f}×）"
-                  f" —— 多半是训练抖动，不要拿它当趋势的一部分解读")
+            print(f"[!] {it_o} = {v_o:.4f} while its neighbours average {nb:.4f} "
+                  f"({v_o/nb:.1f}x higher) - most likely training jitter, do not read it "
+                  f"as part of the trend")
 
         lo, hi = min(v for _, v in vals), max(v for _, v in vals)
-        print(f"\n→ 末段未落定（最后三点相邻变化 "
-              f"{'/'.join(f'{r*100:.0f}%' for r in rel) if rel else 'n/a'}，超过 20%）："
-              f"这条曲线上没有收敛点，每个存档都只是盆地里的一次采样。")
-        print(f"   基线应记成一条带 {lo:.4f}~{hi:.4f}（{hi/lo:.1f}×），不是任何单个数。")
-        print(f"   八成是 constant LR 跑到底、无衰减无 EMA 造成的 —— "
-              f"补一段 cosine 退火通常能把它摁下去（见 configs/exp0827_003 的做法），"
-              f"那比任何架构改动都便宜。")
+        rel_s = "/".join(f"{r*100:.0f}%" for r in rel) if rel else "n/a"
+        print(f"\n-> NOT SETTLED (adjacent change over the last three points is {rel_s}, "
+              f"above 20%). There is no convergence point on this curve; every checkpoint "
+              f"is just one sample from the basin.")
+        print(f"   Record the baseline as a BAND {lo:.4f}~{hi:.4f} ({hi/lo:.1f}x), not as any "
+              f"single number.")
+        print(f"   Most likely cause: constant LR to the end, no decay and no EMA. Appending "
+              f"a cosine anneal usually settles it (see configs/exp0827_003) and costs far "
+              f"less than any architectural change.")
 
 md = out_dir / "summary.md"
 md.write_text("\n".join(lines_md) + "\n", encoding="utf-8")
-print(f"\nmarkdown 表已存到 {md}（可直接粘贴）")
+print(f"\nmarkdown table written to {md}")
 PY
 
 echo ""
-echo "完整日志在: ${OUT_DIR}/"
+echo "full logs: ${OUT_DIR}/"

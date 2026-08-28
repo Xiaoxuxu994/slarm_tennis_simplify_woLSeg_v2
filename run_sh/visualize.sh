@@ -35,8 +35,8 @@ SCENE_ROOT="${DATA_ROOT}/datasets/${DATASET}/${SPLIT}/${SCENE}"
 OUT_DIR="vis_out/${DATASET}/${SCENE}"
 
 [ -d "${SCENE_ROOT}" ] || {
-    echo "场景目录不存在: ${SCENE_ROOT}"
-    echo "检查 DATA_ROOT / DATASET / SPLIT / SCENE 四个变量是否对得上实际布局："
+    echo "scene directory not found: ${SCENE_ROOT}"
+    echo "check that DATA_ROOT / DATASET / SPLIT / SCENE match the actual layout:"
     echo "  <DATA_ROOT>/datasets/<DATASET>/<SPLIT>/<SCENE>/{front_left,front_right,lower_front}/vis/"
     exit 1
 }

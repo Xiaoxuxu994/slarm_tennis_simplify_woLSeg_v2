@@ -21,6 +21,9 @@ ball_pos15_error 莫名其妙地大、落点误差收不下去，而日志里一
     python tools/check_dataset_contract.py --data-root ... --limit 20 --timespan 0.8
 
 只依赖标准库；有 cv2 时会额外校验语义图与可见性标注是否一致（强烈建议装）。
+
+注意：所有运行时输出都是纯 ASCII 英文。终端 locale 常常渲染不了中文和 emoji
+（会变成一串下划线，看起来像什么都没打印），所以注释用中文、输出一律英文。
 """
 from __future__ import annotations
 
@@ -42,7 +45,8 @@ TERMINAL_FRAME = 15
 GRAVITY_RIG = (0.0, 0.0, -9.81)
 
 FAIL, WARN, PASS = "FAIL", "WARN", "PASS"
-_ICON = {FAIL: "❌", WARN: "⚠️ ", PASS: "✅"}
+# 纯 ASCII：emoji 在多数终端 locale 下渲染不出来
+_ICON = {FAIL: "[FAIL]", WARN: "[WARN]", PASS: "[ OK ]"}
 
 
 class Report:
@@ -60,6 +64,7 @@ class Report:
 
     def render(self, show_pass: bool) -> None:
         scope = None
+        shown = 0
         for level, sc, msg in self.items:
             if level == PASS and not show_pass:
                 continue
@@ -67,6 +72,10 @@ class Report:
                 print(f"\n[{sc}]")
                 scope = sc
             print(f"  {_ICON[level]} {msg}")
+            shown += 1
+        if shown == 0:
+            # 全通过且没开 --show-pass 时，别让屏幕看起来像脚本没跑
+            print("\nNo failures or warnings. Re-run with --show-pass to list every check.")
 
 
 # ---------------------------------------------------------------- 小工具
@@ -91,15 +100,16 @@ def _mean_vec(vs):
 
 # ---------------------------------------------------------------- 注册检查
 def check_registration(dataset_name: str, rep: Report) -> dict | None:
-    scope = "constants.py 注册"
+    scope = "constants.py registration"
 
     # 4 处 dataset_name.startswith("ball_catch") 决定是否走接球任务分支
     if dataset_name.startswith("ball_catch"):
-        rep.add(PASS, scope, f"dataset 名 {dataset_name!r} 以 ball_catch 开头")
+        rep.add(PASS, scope, f"dataset name {dataset_name!r} starts with 'ball_catch'")
     else:
         rep.add(FAIL, scope,
-                f"dataset 名 {dataset_name!r} 不以 ball_catch 开头 —— datasets.py 有 4 处 "
-                "startswith('ball_catch') 分流，球轨迹/语义/MS3 都会被跳过且不报错")
+                f"dataset name {dataset_name!r} does not start with 'ball_catch'. "
+                "datasets.py branches on startswith('ball_catch') in 4 places; ball "
+                "trajectory, semantics and MS3 would all be skipped without an error")
 
     try:
         from src.dataset.constants import (
@@ -109,33 +119,35 @@ def check_registration(dataset_name: str, rep: Report) -> dict | None:
         # 只有注册检查需要 import constants（间接依赖 numpy 等）。JSON 契约检查
         # 是纯标准库的，不该被它拖累 —— 降级为警告后继续。
         rep.add(WARN, scope,
-                f"无法 import constants.py（{exc}），跳过注册检查；"
-                "JSON 契约检查照常进行")
+                f"cannot import constants.py ({exc}); skipping registration checks. "
+                "JSON contract checks still run")
         return None
 
     if dataset_name in DATASETS:
-        rep.add(PASS, scope, "DATASETS 已注册（坐标映射）")
+        rep.add(PASS, scope, "registered in DATASETS (coordinate mapping)")
     else:
         rep.add(FAIL, scope,
-                f"DATASETS 缺 {dataset_name!r} —— 会在 datasets.py 取 "
-                "opencv2dataset/canonical_to_flu 时 KeyError")
+                f"DATASETS is missing {dataset_name!r}. datasets.py will KeyError when "
+                "it reads opencv2dataset / canonical_to_flu")
 
     entry = DATASET_DICT.get(dataset_name)
     if entry is None:
         rep.add(FAIL, scope,
-                f"DATASET_DICT 缺 {dataset_name!r} —— 会在取 camera_list/ref_camera 时 KeyError")
+                f"DATASET_DICT is missing {dataset_name!r}. Will KeyError when reading "
+                "camera_list / ref_camera")
         return None
-    rep.add(PASS, scope, "DATASET_DICT 已注册")
+    rep.add(PASS, scope, "registered in DATASET_DICT")
 
     for key in ("size", "camera_list", "ref_camera",
                 "num_context_timesteps", "num_target_timesteps"):
         if key not in entry:
-            rep.add(FAIL, scope, f"DATASET_DICT[{dataset_name}] 缺字段 {key!r}")
+            rep.add(FAIL, scope, f"DATASET_DICT[{dataset_name}] is missing key {key!r}")
 
     if dataset_name not in SEMANTIC_ID_TO_IDX_DICT:
         rep.add(WARN, scope,
-                "SEMANTIC_ID_TO_IDX_DICT 未注册 —— 目前 load_semantic_label 默认 False "
-                "所以走不到；一旦在 config 里打开就会 KeyError")
+                "not registered in SEMANTIC_ID_TO_IDX_DICT. Unreachable today because "
+                "load_semantic_label defaults to False, but enabling it in the config "
+                "would KeyError")
 
     return entry
 
@@ -152,51 +164,54 @@ def check_scene(js: dict, entry: dict, data_root: Path, timespan: float,
                 scope: str, rep: Report, check_images: bool) -> None:
     missing = [k for k in REQUIRED_TOP if k not in js]
     if missing:
-        rep.add(FAIL, scope, f"缺顶层字段: {missing}")
+        rep.add(FAIL, scope, f"missing top-level keys: {missing}")
         return
-    rep.add(PASS, scope, "顶层必需字段齐全")
+    rep.add(PASS, scope, "all required top-level keys present")
 
     n = js["num_timesteps"]
     if not isinstance(n, int) or n < 25:
-        rep.add(FAIL, scope, f"num_timesteps={n}，Stream25 需要 ≥25 帧")
+        rep.add(FAIL, scope, f"num_timesteps={n}; Stream25 needs at least 25 frames")
         return
 
     # ---- 时间契约（datasets.py 里这段校验是 pass，不生效）----
     t = js["normalized_time"]
     if not isinstance(t, list) or len(t) <= ALL_TARGET_FRAMES[-1]:
-        rep.add(FAIL, scope, f"normalized_time 长度 {len(t) if isinstance(t, list) else '?'} ≤ 24")
+        rep.add(FAIL, scope,
+                f"normalized_time has length {len(t) if isinstance(t, list) else '?'}, need > 24")
     else:
         span = float(t[ALL_TARGET_FRAMES[-1]]) - float(t[ALL_TARGET_FRAMES[0]])
         if not math.isfinite(span) or span <= 0:
-            rep.add(FAIL, scope, f"timespan={span} 非法")
+            rep.add(FAIL, scope, f"timespan={span} is not a valid duration")
         elif not math.isclose(span, timespan, rel_tol=0.0, abs_tol=1e-6):
             rep.add(FAIL, scope,
-                    f"timespan={span:.8f} ≠ config 的 {timespan} —— dataloader 的检查是 pass，"
-                    "不会报错，但 MS3/落点的 dt 会全错")
+                    f"timespan={span:.8f} != config value {timespan}. The dataloader check "
+                    "for this is a no-op (if ...: pass), so nothing will complain, but every "
+                    "dt used by MS3 and the landing extrapolation will be wrong")
         else:
-            rep.add(PASS, scope, f"timespan={span:.6f} 与 config 一致")
+            rep.add(PASS, scope, f"timespan={span:.6f} matches the config")
 
     # ---- 相机 ----
-    cams_contract = entry["camera_list"].get(len(js.get("camera_list", []) or []))
     declared_cams = js.get("camera_list")
     if isinstance(declared_cams, list):
         n_cam = len(declared_cams)
         expect = entry["camera_list"].get(n_cam)
         if expect is None:
-            rep.add(FAIL, scope, f"camera_list 有 {n_cam} 个相机，DATASET_DICT 没有对应条目")
+            rep.add(FAIL, scope,
+                    f"camera_list has {n_cam} cameras but DATASET_DICT has no entry for that count")
         elif declared_cams[:len(expect)] != list(expect):
             rep.add(FAIL, scope,
-                    f"camera_list {declared_cams} 与契约 {list(expect)} 不匹配（顺序必须一致）")
+                    f"camera_list {declared_cams} does not match contract {list(expect)} "
+                    "(order matters)")
         else:
-            rep.add(PASS, scope, f"camera_list 与契约一致: {declared_cams}")
+            rep.add(PASS, scope, f"camera_list matches the contract: {declared_cams}")
         cams = declared_cams
     else:
         cams = list(js["camera_to_world"].keys())
-        rep.add(WARN, scope, "无 camera_list 字段，按 camera_to_world 的键推断")
+        rep.add(WARN, scope, "no camera_list field; inferring from camera_to_world keys")
 
     ref_cam = entry.get("ref_camera")
     if ref_cam not in js["camera_to_world"]:
-        rep.add(FAIL, scope, f"camera_to_world 里没有参考相机 {ref_cam!r}")
+        rep.add(FAIL, scope, f"camera_to_world has no reference camera {ref_cam!r}")
 
     # ---- 外参：逐帧 + 是否真的在动 ----
     moving = False
@@ -204,34 +219,37 @@ def check_scene(js: dict, entry: dict, data_root: Path, timespan: float,
         c2w = js["camera_to_world"].get(cam)
         if not isinstance(c2w, list) or len(c2w) != n:
             rep.add(FAIL, scope,
-                    f"camera_to_world[{cam}] 长度 {len(c2w) if isinstance(c2w, list) else '?'}"
-                    f" ≠ num_timesteps {n}")
+                    f"camera_to_world[{cam}] has length "
+                    f"{len(c2w) if isinstance(c2w, list) else '?'}, expected num_timesteps {n}")
             continue
         if not _is_mat4(c2w[0]):
-            rep.add(FAIL, scope, f"camera_to_world[{cam}][0] 不是 4x4")
+            rep.add(FAIL, scope, f"camera_to_world[{cam}][0] is not a 4x4 matrix")
             continue
         drift = max(_norm(_sub([c2w[k][i][3] for i in range(3)],
                                [c2w[0][i][3] for i in range(3)]))
                     for k in range(n))
         if drift > 1e-6:
             moving = True
-    rep.add(PASS, scope, f"camera_to_world 形状正确（{n} 帧 × 4x4）")
+    rep.add(PASS, scope, f"camera_to_world has the right shape ({n} frames x 4x4)")
     if moving:
         rep.add(WARN, scope,
-                "相机位置逐帧变化 —— 代码支持逐帧外参，但若 rig 本体也在动，见下面 rig 检查")
+                "camera positions change per frame. Per-frame extrinsics are supported, "
+                "but if the rig body itself is moving see the rig_to_world check below")
 
     # ---- 内参量纲：必须是归一化值 ----
     for cam in cams:
         k = js["normalized_intrinsics"].get(cam)
         if not isinstance(k, list) or len(k) != 4:
-            rep.add(FAIL, scope, f"normalized_intrinsics[{cam}] 应为 4 个数 (fx,fy,cx,cy)")
+            rep.add(FAIL, scope,
+                    f"normalized_intrinsics[{cam}] should be 4 numbers (fx, fy, cx, cy)")
             continue
         if any(abs(x) > 4.0 for x in k):
             rep.add(FAIL, scope,
-                    f"normalized_intrinsics[{cam}]={[round(x,2) for x in k]} 看着像像素值。"
-                    "datasets.py 会再乘 target_size，写成像素会让内参放大几百倍且不报错")
+                    f"normalized_intrinsics[{cam}]={[round(x, 2) for x in k]} looks like "
+                    "pixel values. datasets.py multiplies these by target_size, so pixel "
+                    "units inflate the intrinsics by a few hundred times, silently")
         else:
-            rep.add(PASS, scope, f"normalized_intrinsics[{cam}] 已归一化")
+            rep.add(PASS, scope, f"normalized_intrinsics[{cam}] is normalized")
         break   # 各相机同构，抽一个即可
 
     # ---- 路径字段 ----
@@ -241,39 +259,44 @@ def check_scene(js: dict, entry: dict, data_root: Path, timespan: float,
             paths = table.get(cam)
             if not isinstance(paths, list) or len(paths) != n:
                 rep.add(FAIL, scope,
-                        f"{key}[{cam}] 长度 {len(paths) if isinstance(paths, list) else '?'} ≠ {n}")
+                        f"{key}[{cam}] has length "
+                        f"{len(paths) if isinstance(paths, list) else '?'}, expected {n}")
                 break
         else:
-            rep.add(PASS, scope, f"{key} 各相机长度均为 {n}")
+            rep.add(PASS, scope, f"{key} has {n} entries for every camera")
 
     # ---- 球轨迹 ----
     bt = js["ball_trajectory"]
     r2w = bt.get("rig_to_world")
     if _is_mat4(r2w):
-        rep.add(PASS, scope, "rig_to_world 是单个 4x4（rig 静止，rig 系为惯性系）")
+        rep.add(PASS, scope,
+                "rig_to_world is a single 4x4 (rig is static, so the rig frame is inertial)")
         if moving:
             rep.add(WARN, scope,
-                    "相机在动但 rig_to_world 只有一个 —— 若相机是刚性装在 rig 上，"
-                    "说明 rig 也在动，则物理外推 pos+v·dt+½g·dt² 在 rig 系不成立（非惯性系），"
-                    "且 pos15 与 gt_pos24 不在同一个系里")
+                    "cameras move but rig_to_world is a single matrix. If the cameras are "
+                    "rigidly mounted on the rig then the rig is moving too, which makes the "
+                    "rig frame non-inertial: pos + v*dt + 0.5*g*dt^2 no longer holds, and "
+                    "pos15 and gt_pos24 are not expressed in the same frame")
     elif isinstance(r2w, list) and len(r2w) == n and _is_mat4(r2w[0]):
         rep.add(FAIL, scope,
-                "rig_to_world 是逐帧的 —— 当前代码 (datasets.py) 按单个 4x4 读取，会取错值")
+                "rig_to_world is per-frame, but datasets.py reads it as a single 4x4 and "
+                "will pick up the wrong value")
     else:
-        rep.add(FAIL, scope, "rig_to_world 格式无法识别（应为 4x4）")
+        rep.add(FAIL, scope, "rig_to_world is not recognizable (expected a 4x4 matrix)")
 
     frames = bt.get("frames")
     if not isinstance(frames, list) or len(frames) != n:
         rep.add(FAIL, scope,
-                f"ball_trajectory.frames 长度 {len(frames) if isinstance(frames, list) else '?'} ≠ {n}")
+                f"ball_trajectory.frames has length "
+                f"{len(frames) if isinstance(frames, list) else '?'}, expected {n}")
         return
     for key in ("position_rig", "velocity_rig"):
         bad = [i for i, fr in enumerate(frames)
                if not isinstance(fr.get(key), list) or len(fr[key]) != 3]
         if bad:
-            rep.add(FAIL, scope, f"frames[{bad[:3]}...] 的 {key} 不是长度 3 的向量")
+            rep.add(FAIL, scope, f"frames[{bad[:3]}...] have a {key} that is not a 3-vector")
             return
-    rep.add(PASS, scope, f"position_rig / velocity_rig 齐全（{n} 帧）")
+    rep.add(PASS, scope, f"position_rig / velocity_rig present for all {n} frames")
 
     # ---- 惯性系自洽：二阶差分应等于重力 ----
     pos = [fr["position_rig"] for fr in frames]
@@ -291,11 +314,15 @@ def check_scene(js: dict, entry: dict, data_root: Path, timespan: float,
         err = _norm(_sub(m, list(GRAVITY_RIG)))
         shown = [round(x, 2) for x in m]
         if err < 1.5:
-            rep.add(PASS, scope, f"球加速度(rig) 均值 {shown} ≈ 重力，坐标系自洽")
+            rep.add(PASS, scope,
+                    f"mean ball acceleration in rig frame {shown} is close to gravity; "
+                    "frame definition and timestamps are self-consistent")
         else:
             rep.add(FAIL, scope,
-                    f"球加速度(rig) 均值 {shown}，应 ≈ {list(GRAVITY_RIG)}（偏差 {err:.2f}）。"
-                    "坐标系定义或时间戳有问题；MS3 的 GT 与物理外推都会错")
+                    f"mean ball acceleration in rig frame is {shown}, expected about "
+                    f"{list(GRAVITY_RIG)} (off by {err:.2f}). Either the frame definition or "
+                    "the timestamps are wrong; both the MS3 targets and the physical "
+                    "extrapolation will be wrong. A wrong timespan shows up here first")
 
         # 速度字段与位置差分是否自洽
         vel_err = []
@@ -307,11 +334,14 @@ def check_scene(js: dict, entry: dict, data_root: Path, timespan: float,
         if vel_err:
             med = sorted(vel_err)[len(vel_err) // 2]
             if med < 0.3:
-                rep.add(PASS, scope, f"velocity_rig 与位置差分自洽（中位差 {med:.3f} m/s）")
+                rep.add(PASS, scope,
+                        f"velocity_rig agrees with the position difference "
+                        f"(median gap {med:.3f} m/s)")
             else:
                 rep.add(WARN, scope,
-                        f"velocity_rig 与位置差分不一致（中位差 {med:.3f} m/s）—— "
-                        "ball token 的速度监督会被这个不一致污染")
+                        f"velocity_rig disagrees with the position difference "
+                        f"(median gap {med:.3f} m/s). Any velocity supervision reads a "
+                        "target that the positions do not support")
 
     # ---- 可见性：先做不需要读图的部分（没装 cv2 也能查）----
     declared = _declared_visibility(js, cams, n, scope, rep)
@@ -329,7 +359,7 @@ def _declared_visibility(js: dict, cams, n: int, scope: str,
     frames_by_cam = js.get("ball_visible_frames_by_camera")
     if mask_by_cam is None and frames_by_cam is None:
         rep.add(FAIL, scope,
-                "缺 ball_visible_mask_by_camera / ball_visible_frames_by_camera")
+                "neither ball_visible_mask_by_camera nor ball_visible_frames_by_camera present")
         return None
     out: dict[str, list[bool]] = {}
     for cam in cams:
@@ -339,11 +369,12 @@ def _declared_visibility(js: dict, cams, n: int, scope: str,
             s = set(int(x) for x in frames_by_cam[cam])
             out[cam] = [i in s for i in range(n)]
         else:
-            rep.add(FAIL, scope, f"可见性标注里没有相机 {cam!r}")
+            rep.add(FAIL, scope, f"visibility annotation has no camera {cam!r}")
             return None
         if len(out[cam]) != n:
             rep.add(FAIL, scope,
-                    f"可见性标注[{cam}] 长度 {len(out[cam])} ≠ num_timesteps {n}")
+                    f"visibility annotation for {cam} has length {len(out[cam])}, "
+                    f"expected num_timesteps {n}")
             return None
     # 两种格式都给了就必须自洽
     if mask_by_cam is not None and frames_by_cam is not None:
@@ -352,7 +383,7 @@ def _declared_visibility(js: dict, cams, n: int, scope: str,
                 s = set(int(x) for x in frames_by_cam[cam])
                 if [bool(x) for x in mask_by_cam[cam]] != [i in s for i in range(n)]:
                     rep.add(FAIL, scope,
-                            f"[{cam}] mask_by_camera 与 frames_by_camera 不一致")
+                            f"[{cam}] mask_by_camera and frames_by_camera disagree")
     return out
 
 
@@ -364,11 +395,13 @@ def _check_context_visibility(declared: dict, cams, scope: str, rep: Report) -> 
     bad = [(cam, f) for cam in cams for f in CONTEXT_FRAMES if not declared[cam][f]]
     if bad:
         rep.add(FAIL, scope,
-                f"context 帧 {list(CONTEXT_FRAMES)} 须在所有视图可见，但 {bad} 声明不可见 —— "
-                "build_frame_eye_visibility 的契约是「每个被接纳的观测都必须在每个原生视图可见」，"
-                "而那里的检查是 pass，不会拦住；该帧的球监督会缺失")
+                f"context frames {list(CONTEXT_FRAMES)} must be visible in every view, but "
+                f"{bad} are declared not visible. build_frame_eye_visibility requires every "
+                "accepted observation to be visible in every native view, and its check is a "
+                "no-op, so nothing stops this; the ball supervision for those frames is lost")
     else:
-        rep.add(PASS, scope, f"context 帧 {list(CONTEXT_FRAMES)} 在所有视图均可见")
+        rep.add(PASS, scope,
+                f"context frames {list(CONTEXT_FRAMES)} are visible in every view")
 
 
 def _check_visibility(js: dict, cams, n: int, data_root: Path,
@@ -377,7 +410,8 @@ def _check_visibility(js: dict, cams, n: int, data_root: Path,
         import cv2
         import numpy as np
     except ImportError:
-        rep.add(WARN, scope, "未装 cv2/numpy，跳过语义图与可见性标注的一致性校验")
+        rep.add(WARN, scope,
+                "cv2/numpy not installed; skipping the semantic-map vs visibility check")
         return
 
     mismatches, missing_files = [], 0
@@ -394,44 +428,51 @@ def _check_visibility(js: dict, cams, n: int, data_root: Path,
                 mismatches.append((cam, fi, declared[cam][fi], actual))
 
     if missing_files:
-        rep.add(FAIL, scope, f"{missing_files} 个语义图文件读不到（路径错或文件缺失）")
-    if mismatches:
-        head = ", ".join(f"{c}@{f}(声明{d}/实际{a})" for c, f, d, a in mismatches[:4])
         rep.add(FAIL, scope,
-                f"{len(mismatches)} 处可见性标注与语义图不符: {head}"
-                f"{' ...' if len(mismatches) > 4 else ''} —— dataloader 的 preflight 是 pass，"
-                "不会拦住，但 ball_iou / 落点评测会被污染")
+                f"{missing_files} semantic map files could not be read (wrong path or missing)")
+    if mismatches:
+        head = ", ".join(f"{c}@{f}(declared={d}/actual={a})" for c, f, d, a in mismatches[:4])
+        rep.add(FAIL, scope,
+                f"{len(mismatches)} visibility annotations disagree with the semantic maps: "
+                f"{head}{' ...' if len(mismatches) > 4 else ''}. The dataloader preflight for "
+                "this is a no-op, so it will not stop training, but ball_iou and the landing "
+                "metrics get polluted")
     elif not missing_files:
-        rep.add(PASS, scope, "可见性标注与语义图逐帧一致")
+        rep.add(PASS, scope, "visibility annotations agree with the semantic maps frame by frame")
 
 
 # ---------------------------------------------------------------- main
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="接入新数据集前的契约自检（dataloader 里那些被 pass 掉的检查）")
+        description="Contract self-check before onboarding a dataset. Runs the validations "
+                    "that exist in the dataloader but whose failure branches are all `pass`.")
     ap.add_argument("--data-root", type=Path, required=True,
-                    help="如 data/SLARM_data_catch45")
+                    help="e.g. data/SLARM_data_catch45")
     ap.add_argument("--annotation", type=str, default=None,
-                    help="scene_list txt；默认自动找 *_train.txt / *_validation.txt")
-    ap.add_argument("--limit", type=int, default=5, help="抽查前 N 个场景（0=全部）")
-    ap.add_argument("--timespan", type=float, default=0.8, help="与 config 的 timespan 一致")
+                    help="scene_list txt; defaults to every scene_list/*.txt under data-root")
+    ap.add_argument("--limit", type=int, default=5,
+                    help="check the first N scenes (0 = all)")
+    ap.add_argument("--timespan", type=float, default=0.8,
+                    help="must match the timespan in the training config")
     ap.add_argument("--no-images", action="store_true",
-                    help="跳过语义图校验（快，但漏掉可见性一致性）")
-    ap.add_argument("--show-pass", action="store_true", help="连通过项一起打印")
+                    help="skip the semantic map check (faster, but misses visibility mismatches)")
+    ap.add_argument("--show-pass", action="store_true",
+                    help="also print the checks that passed")
     ap.add_argument("--json-only", action="store_true",
-                    help="只做 JSON 契约检查，不 import constants.py（无需 torch/numpy 环境）")
+                    help="JSON contract checks only, without importing constants.py "
+                         "(no torch/numpy needed)")
     args = ap.parse_args()
 
     root = args.data_root
     if not root.exists():
-        print(f"❌ data_root 不存在: {root}")
+        print(f"[FAIL] data_root does not exist: {root}")
         return 2
 
     ann_files = ([root / args.annotation] if args.annotation
                  else sorted(root.glob("scene_list/*.txt")))
     ann_files = [p for p in ann_files if p.exists()]
     if not ann_files:
-        print(f"❌ 找不到 scene_list（{root}/scene_list/*.txt）")
+        print(f"[FAIL] no scene_list found at {root}/scene_list/*.txt")
         return 2
 
     scene_files: list[Path] = []
@@ -444,41 +485,43 @@ def main() -> int:
             scene_files.append(p if p.is_absolute() else root / p)
 
     if not scene_files:
-        print(f"❌ scene_list 是空的: {[str(p) for p in ann_files]}")
+        print(f"[FAIL] scene_list is empty: {[str(p) for p in ann_files]}")
         return 2
 
     picked = scene_files if args.limit <= 0 else scene_files[:args.limit]
 
     print("=" * 72)
-    print("数据集契约检查")
+    print("Dataset contract check")
     print("=" * 72)
     print(f"data_root : {root}")
-    print(f"scene_list: {[p.name for p in ann_files]}  共 {len(scene_files)} 个场景")
-    print(f"抽查      : {len(picked)} 个"
-          f"{'（全部）' if args.limit <= 0 else f'（--limit {args.limit}）'}")
-    print(f"timespan  : {args.timespan}")
+    print(f"scene_list: {[p.name for p in ann_files]}  ({len(scene_files)} scenes total)")
+    print(f"checking  : {len(picked)} scene(s)"
+          f"{' (all)' if args.limit <= 0 else f' (--limit {args.limit})'}")
+    print(f"timespan  : {args.timespan}  (seconds spanned by frames 0..24)")
 
     rep = Report()
     first = None
     for p in picked:
         if not p.exists():
-            rep.add(FAIL, "scene_list", f"标注文件不存在: {p}")
+            rep.add(FAIL, "scene_list", f"annotation file does not exist: {p}")
             continue
         try:
             js = json.loads(p.read_text(encoding="utf-8"))
         except Exception as exc:                              # noqa: BLE001
-            rep.add(FAIL, p.name, f"JSON 解析失败: {exc}")
+            rep.add(FAIL, p.name, f"JSON parse failed: {exc}")
             continue
         if first is None:
             first = js
-            entry = None if args.json_only else check_registration(js.get("dataset", ""), rep)
+            name = js.get("dataset", "")
+            print(f"dataset   : {name!r}  <- constants.py must use this exact string")
+            entry = None if args.json_only else check_registration(name, rep)
             if args.json_only:
-                name = js.get("dataset", "")
                 rep.add(PASS if name.startswith("ball_catch") else FAIL,
-                        "命名约束",
+                        "naming",
                         f"dataset={name!r}"
                         + ("" if name.startswith("ball_catch")
-                           else " —— 必须以 ball_catch 开头，否则跳过接球任务分支"))
+                           else "; must start with 'ball_catch' or the ball-catch task "
+                                "branches are skipped"))
             if entry is None:
                 # 注册信息拿不到（未注册，或环境缺依赖）时，用 Stream25 的冻结契约兜底，
                 # 这样 JSON 层面的检查仍然能跑完
@@ -493,15 +536,18 @@ def main() -> int:
     rep.render(args.show_pass)
     c = rep.counts()
     print("\n" + "=" * 72)
-    print(f"结果: {_ICON[FAIL]} {c[FAIL]} 个错误   "
-          f"{_ICON[WARN]} {c[WARN]} 个警告   {_ICON[PASS]} {c[PASS]} 项通过")
+    print(f"Result: {c[FAIL]} failed, {c[WARN]} warnings, {c[PASS]} passed")
     if c[FAIL]:
-        print("\n有 FAIL 项。注意 dataloader 里对应的校验都是 `if ...: pass`，")
-        print("不会拦住训练 —— 但结果会静默出错，务必先修数据再训。")
+        print("")
+        print("There are failures. The matching validations inside the dataloader are all")
+        print("`if ...: pass`, so training will start anyway and produce wrong signal")
+        print("silently. Fix the data before training.")
     elif c[WARN]:
-        print("\n没有硬错误。警告项建议逐条确认后再开始训练。")
+        print("")
+        print("No hard failures. Read each warning and confirm it is expected before training.")
     else:
-        print("\n全部通过，可以接入训练。")
+        print("")
+        print("All checks passed. Safe to onboard.")
     print("=" * 72)
     return 1 if c[FAIL] else 0
 
