@@ -8,6 +8,11 @@ GPUS="4,5,6,7"
 CONFIG="configs/exp0814_slarm_stream25_24cm_triview_window6_reproduce.yaml"
 # CONFIG="configs/slarm_stream25_24cm_triview_window6.yaml"
 
+# 断点续训：改成 1，其他什么都不用动（CONFIG/GPUS 保持和中断那次一致即可）。
+# ckpt 目录由 output_dir/project/exp_name 推出来，会自动挑最新的一个接着跑，
+# 权重/optimizer/loss_scaler/迭代数/采样器进度全部恢复，config 里的 load_from 会被忽略。
+RESUME=0
+
 # ---- 6.5cm 实验组（起点统一为 exp0825_002 的 ckpt_039999）----
 #
 # 基线是一条带不是一个数：verify_sweep 扫 5 个 stage1 ckpt，pos15 median
@@ -43,6 +48,15 @@ export FEAT_DIST=1
 # 否则命令行会盖过 YAML）；这里只开 TensorBoard。
 # TensorBoard event 写到 <output_dir>/<project>/<exp_name>/tensorboard/
 EXTRA_ARGS=(--enable_tensorboard)
+
+if [ "${RESUME}" = "1" ]; then
+    # --auto_resume 是按**文件 mtime**挑最新 ckpt（misc.load_model），不是按步数。
+    # 如果 ckpt 被 cp/rsync/scp 动过，mtime 顺序会和步数顺序脱节，可能续错点。
+    # 那种情况下别用 auto，直接写死：bash run_sh/train.sh --resume_from <ckpt路径>
+    # （命令行参数在 EXTRA_ARGS 之后透传，resume_from 优先级高于 auto_resume）
+    EXTRA_ARGS+=(--auto_resume)
+    echo "[resume] 从最新 ckpt 续训（config 里的 load_from 会被忽略）"
+fi
 
 if [ "${DEVICE_NUM}" -gt 1 ]; then
     exec torchrun --nproc_per_node="${DEVICE_NUM}" --master_port 16818 \
