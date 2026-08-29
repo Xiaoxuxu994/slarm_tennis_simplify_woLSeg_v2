@@ -40,6 +40,9 @@ RESUME=0
 # attention 层。回答 A/B 回答不了的问题：球的位置信息是 backbone 学不到，
 # 还是从来没人要求它学。从退火 ckpt 续训，不用重训 40k。
 # CONFIG="configs/exp0829_001_slarm_stream25_6.5cm_triview_window6_nolseg_balltoken_intrunk.yml"
+# 外挂版对照：与上面逐键相同，只差两个开关。两组之差 = token 位置之差，没有别的解释。
+# 单跑 in-trunk 回答不了"位置有没有用" —— 它和之前的 A/B 差了四个变量。
+# CONFIG="configs/exp0829_002_slarm_stream25_6.5cm_triview_window6_nolseg_balltoken_external.yml"
 #
 # ── catch45 场景微调（新数据）──
 # 起点是退火终点，目前最好的 backbone。开跑前先做 config 抬头列的三项核对 + zero-shot 评测。

@@ -1,0 +1,133 @@
+# 6.5cm ball token · 外挂版对照组（exp0829_001 的唯一变量对照）
+#
+# ─────────────────────────────────────────────────────────────
+# 这组存在的唯一理由：让"in-trunk 到底比外挂好在哪"这个问题有个干净的答案。
+#
+# 之前的 A/B（exp0827_001/002）和 in-trunk（exp0829_001）之间差了四个变量 ——
+# 起点 ckpt、lr_sched、backbone 冻结与否、token 位置。in-trunk 就算赢了，
+# 也分不清是位置的功劳还是退火起点的功劳（退火本身就值 33%）。
+#
+# 本组与 exp0829_001 **逐键相同**，只差这两行：
+#     use_ball_token:         false -> true
+#     use_ball_token_intrunk: true  -> false
+# 起点、lr、trunk_lr、调度、步数、seed、损失权重全部一致。
+# 于是两组之差 = token 位置之差，没有别的解释。
+#
+# 有一处固有的不对称，解读时要记得：
+#   外挂版多出一整个 cross-attn Block（ball_block，约 28M 参数），
+#   in-trunk 版没有 —— 它复用 trunk 里已有的 attention，只加一个 token
+#   + LayerNorm + 读出头（约 4.7M）。
+#   这不是配置不公平，是两种方法的固有差异：in-trunk 本来就不需要额外的
+#   attention 层。但因此：
+#     in-trunk 赢  -> 结论更强（更少参数、更好结果）；
+#     in-trunk 输  -> 要先排除"容量不够"再下结论，
+#                     可以把 ball_head_intrunk 加宽一档再试一次。
+#   跑之前用 tools/check_model_init.py 看两组的总参数量，把这个差记下来。
+# ─────────────────────────────────────────────────────────────
+#
+# 判读（两组各自跑 verify，比的是**比值**不是绝对值）：
+#   同一次 verify 里 balltoken 那一路 / pred 那一路的 frame24 比值。
+#   配对设计让 backbone 质量对两条路是同一个，比值因此可比。
+#   参考点：A 组（冻结 + stage1 起点）的比值是 0.087 / 0.038 = 2.29x。
+#
+#   两组比值差不到 10% -> 位置无所谓，ball token 这条路的瓶颈在别处，可以收了；
+#   in-trunk 明显更低  -> 位置是关键，值得继续投（加宽、加深、多帧监督）；
+#   外挂明显更低      -> 我关于"post-hoc probe 读不出来"的推断是错的，
+#                        那 A 组的失败要另找解释（多半是冻结，不是位置）。
+model: slarm
+dataset: [ball_catch_6.5cm_triview]
+data_root: data/SLARM_data_6.5
+
+input_size: [320, 240]
+patch_size: 8
+embed_dim: 768
+depth: 12
+patch_embed: conv
+num_max_cameras: 3
+num_context_timesteps: 6
+num_target_timesteps: 7
+context_stride: 3
+timespan: 0.8
+mode: window_6
+
+use_affine_token: true
+use_sky_token: true
+use_ms3_motion: true
+use_last_token: true
+shortcut_rgb: true
+add_patch_plucker_embed: true
+sigmoid_rgb: true
+num_motion_tokens: 0
+
+strict_data_loading: true
+enable_task_semantic_head: true
+terminal_context_extrapolation: true
+stream25_render_target_chunk_size: 7
+stream25_reconstruction_loss: true
+
+# ---- ball token：in-trunk（本实验主角）----
+use_ball_token: true             # ★ 本组：外挂 cross-attn（ball_query + ball_block + ball_head）
+use_ball_token_intrunk: false    # ★ in-trunk 关掉。两个都开会同时收到梯度，谁学到什么就分不清了
+ball_token_freeze_backbone: false
+# ↑ 必须 false。in-trunk 配 freeze 在概念上是矛盾的 —— 把 token 放进 trunk 的全部
+#   意义就是让梯度回到 backbone，冻住之后它退化成一个比外挂版还弱的 probe。
+stream25_ball_pos_weight: 1.0
+stream25_ball_vel_weight: 1.0
+
+# ---- 损失权重：与 exp0827_003 逐项一致 ----
+# 只改结构和 LR。权重跟着动的话，重建退化就说不清是谁的锅。
+stream25_rgb_weight: 1.00
+stream25_lpips_weight: 0.05
+stream25_ball_rgb_weight: 0.50
+stream25_depth_relative_weight: 1.00
+stream25_ball_depth_metric_weight: 0.5
+stream25_semantic_weight: 1.00
+stream25_ms3_ball_weight: 1.00
+stream25_ms3_static_weight: 0.25
+stream25_opacity_weight: 0.10
+
+stream25_ms3_velocity_scale: 5.0
+stream25_ms3_acceleration_scale: 9.81
+stream25_ms3_jerk_scale: 1.0
+terminal_dynamic_velocity_threshold: 1.0
+stream25_semantic_class_weight_cap: 10.0
+
+# ---- 无 LSeg ----
+online_feat: false
+enable_feat_loss: false
+feat_loss_coeff: 0.0
+stream25_lseg_feature_weight: 0.0
+enable_depth_loss: true
+enable_sky_opacity_loss: true
+enable_perceptual_loss: true
+perceptual_weight: 0.05
+perceptual_loss_start_iter: 0
+load_depth: true
+
+# ---- 优化 ----
+# 起点是退火落定的收敛点，动它要很小心；但 ball_token / norm / head 是新初始化的，
+# 需要正常量级的 LR。这两个需求靠参数分组分开满足：
+#   head 组（含 ball_token，见上面的坑 1）= lr        -> 新模块学得起来
+#   trunk 组（backbone）                  = trunk_lr  -> 退火成果不被冲掉
+lr: 5.0e-5                   # 比 exp0827_002 的 3e-5 高一档：新模块要学
+stream25_trunk_lr: 2.0e-6    # 比例拉到 25:1，backbone 改得比任何一组都慢
+lr_sched: cosine             # ★ constant 是把 stage1 弄抖的元凶，不许改
+min_lr: 1.0e-7
+warmup_iters: 1000           # 保护退火后的 backbone 不被前几步的大梯度冲掉
+batch_size: 1
+seed: 20260829
+
+# ★ 起点：6.5cm 退火终点。ckpt 里没有 ball_* 权重，load_model 是 strict=False，
+#   那三组会新初始化 —— 这正是本实验想要的。
+load_from: work_dirs/slarm/exp0827_003_slarm_stream25_6.5cm_triview_window6_nolseg_anneal/checkpoints/ckpt_005999.pth
+
+train_annotation: scene_list/ball_catch_6.5cm_triview_train.txt
+eval_annotation: scene_list/ball_catch_6.5cm_triview_validation.txt
+num_iterations: 15000
+ckpt_every_n_iters: 1000
+vis_every_n_iters: 3000
+num_vis_samples: 1
+eval_every_n_iters: 50000
+keep_n_ckpts: 15
+project: slarm
+exp_name: exp0829_002_slarm_stream25_6.5cm_triview_window6_nolseg_balltoken_external
