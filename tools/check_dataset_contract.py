@@ -232,9 +232,9 @@ def check_scene(js: dict, entry: dict, data_root: Path, timespan: float,
             moving = True
     rep.add(PASS, scope, f"camera_to_world has the right shape ({n} frames x 4x4)")
     if moving:
-        rep.add(WARN, scope,
-                "camera positions change per frame. Per-frame extrinsics are supported, "
-                "but if the rig body itself is moving see the rig_to_world check below")
+        rep.add(PASS, scope,
+                "camera positions change per frame (per-frame extrinsics are supported); "
+                "whether that is a problem is decided by the gravity check below")
 
     # ---- 内参量纲：必须是归一化值 ----
     for cam in cams:
@@ -268,15 +268,14 @@ def check_scene(js: dict, entry: dict, data_root: Path, timespan: float,
     # ---- 球轨迹 ----
     bt = js["ball_trajectory"]
     r2w = bt.get("rig_to_world")
-    if _is_mat4(r2w):
-        rep.add(PASS, scope,
-                "rig_to_world is a single 4x4 (rig is static, so the rig frame is inertial)")
-        if moving:
-            rep.add(WARN, scope,
-                    "cameras move but rig_to_world is a single matrix. If the cameras are "
-                    "rigidly mounted on the rig then the rig is moving too, which makes the "
-                    "rig frame non-inertial: pos + v*dt + 0.5*g*dt^2 no longer holds, and "
-                    "pos15 and gt_pos24 are not expressed in the same frame")
+    # 相机在动 + rig_to_world 单矩阵，这个组合本身**不能**判定数据有问题：
+    # 它既可能是"rig 在加速运动、rig 系已非惯性系"（真坏），也可能是
+    # "rig 静止或匀速，相机相对 rig 在动（云台/机械臂），rig 系被定义为某个固定位姿"
+    # （完全合法）。区分这两者的唯一判据是球加速度的二阶差分是不是重力 ——
+    # 所以这条延到重力检查之后再发，措辞按重力的结果定。
+    rig_single = _is_mat4(r2w)
+    if rig_single:
+        rep.add(PASS, scope, "rig_to_world is a single 4x4")
     elif isinstance(r2w, list) and len(r2w) == n and _is_mat4(r2w[0]):
         rep.add(FAIL, scope,
                 "rig_to_world is per-frame, but datasets.py reads it as a single 4x4 and "
@@ -317,12 +316,27 @@ def check_scene(js: dict, entry: dict, data_root: Path, timespan: float,
             rep.add(PASS, scope,
                     f"mean ball acceleration in rig frame {shown} is close to gravity; "
                     "frame definition and timestamps are self-consistent")
+            if moving and rig_single:
+                # 重力自洽 => rig 系是惯性系。相机逐帧变只是相机相对 rig 在动，
+                # 或者 rig 做匀速直线运动 —— 两种都不影响物理外推。
+                rep.add(PASS, scope,
+                        "cameras move per frame while rig_to_world is a single matrix, and "
+                        "the gravity check passes -- so the rig frame is still inertial "
+                        "(cameras moving relative to a fixed rig, or a rig in uniform motion). "
+                        "Per-frame extrinsics are supported and the extrapolation stays valid")
         else:
             rep.add(FAIL, scope,
                     f"mean ball acceleration in rig frame is {shown}, expected about "
                     f"{list(GRAVITY_RIG)} (off by {err:.2f}). Either the frame definition or "
                     "the timestamps are wrong; both the MS3 targets and the physical "
                     "extrapolation will be wrong. A wrong timespan shows up here first")
+            if moving and rig_single:
+                rep.add(FAIL, scope,
+                        "and the cameras move per frame while rig_to_world is a single "
+                        "matrix -- that combination plus a failed gravity check means the rig "
+                        "itself is accelerating, so the rig frame is not inertial: "
+                        "pos + v*dt + 0.5*g*dt^2 does not hold and pos15 and gt_pos24 are not "
+                        "in the same frame. rig_to_world has to become per-frame")
 
         # 速度字段与位置差分是否自洽
         vel_err = []

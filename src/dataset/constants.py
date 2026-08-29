@@ -24,6 +24,10 @@ DATASETS = {
     # rig 原点高度不同（catch45 离地 1.0m，24cm/6.5cm 是 1.5m）不在这里体现 ——
     # rig_to_world 是逐场景从标注 JSON 读的，这两个矩阵只描述轴序约定。
     "ball_catch_6.5cm_triview_catch45": {"opencv2dataset": opencv2waymo, "canonical_to_flu": np.eye(4)},
+    # v3_0829：同一套坐标约定。这批的相机外参逐帧变化而 rig_to_world 是单个矩阵，
+    # 但球加速度的二阶差分仍等于重力，说明 rig 系依然是惯性系（相机相对固定 rig 运动，
+    # 或 rig 匀速直线运动），物理外推照常成立，这两个矩阵不受影响。
+    "ball_catch_triview_v3_0829": {"opencv2dataset": opencv2waymo, "canonical_to_flu": np.eye(4)},
 }
 
 waymo_train = "scene_list/waymo_train.txt"  # NOTE: Use full data for multi-GPU
@@ -204,6 +208,24 @@ DATASET_DICT = {
         "num_target_timesteps": 7,
         "annotation_txt_file_train": "scene_list/ball_catch_6.5cm_triview_catch45_train.txt",
         "annotation_txt_file_val": "scene_list/ball_catch_6.5cm_triview_catch45_validation.txt",
+        "camera_list": {
+            2: ["front_left", "front_right"],
+            3: ["front_left", "front_right", "lower_front"],
+        },
+        "ref_camera": "front_left",
+    },
+
+    # v3_0829（data_root: data/slarm_data）。结构与前几批相同。
+    # ★ 用之前先看 tools/check_dataset_contract.py --visibility-summary：
+    #   抽查 5 个场景里有 2 个出现"某个 context 帧三视图全盲"，其中一个是 frame 15
+    #   —— 那种场景的落点预测没有锚点，是 frame24 指标里的纯噪声。
+    "ball_catch_triview_v3_0829": {
+        "size": [320, 240],
+        "temporal": True,
+        "num_context_timesteps": 6,
+        "num_target_timesteps": 7,
+        "annotation_txt_file_train": "scene_list/ball_catch_triview_v3_0829_train.txt",
+        "annotation_txt_file_val": "scene_list/ball_catch_triview_v3_0829_validation.txt",
         "camera_list": {
             2: ["front_left", "front_right"],
             3: ["front_left", "front_right", "lower_front"],
