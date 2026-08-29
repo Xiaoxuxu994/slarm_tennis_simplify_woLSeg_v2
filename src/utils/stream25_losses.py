@@ -532,8 +532,17 @@ _TRUNK_PREFIXES = (
     "aggregated_last_tokens_norm",
 )
 
+# in-trunk ball token 物理上住在 aggregator 里，前缀会命中 "aggregator."，
+# 但它是随机初始化的新模块，用 trunk_lr（head 的 1/5 ~ 1/10）根本学不起来。
+# 按"新模块"的性质归到 head 组，与 ball_token_norm / ball_head_intrunk 同一档 LR。
+_TRUNK_EXCEPTIONS = (
+    "aggregator.ball_token",
+)
+
 
 def _is_trunk_param(name: str) -> bool:
+    if any(name.startswith(p) for p in _TRUNK_EXCEPTIONS):
+        return False
     return any(name.startswith(p) for p in _TRUNK_PREFIXES)
 
 

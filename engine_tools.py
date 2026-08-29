@@ -67,6 +67,7 @@ def build_model(args):
             terminal_dynamic_velocity_threshold=getattr(args, "terminal_dynamic_velocity_threshold", 1.0),
             ms3_physics_override=getattr(args, "ms3_physics_override", False),
             use_ball_token=getattr(args, "use_ball_token", False),
+            use_ball_token_intrunk=getattr(args, "use_ball_token_intrunk", False),
             render_target_chunk_size=getattr(
                 args, "stream25_render_target_chunk_size", 20
             ),

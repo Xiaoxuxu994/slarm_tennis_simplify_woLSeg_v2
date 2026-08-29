@@ -161,6 +161,7 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
         # 内建 ball token（可选）：cross-attend frame15 terminal scene tokens，
         # 预测球心 pos15(xyz, rig系)+ 速度 v15。默认关闭时完全不影响现有行为。
         use_ball_token=False,
+        use_ball_token_intrunk=False,
         # stream
         mode="full", #  default use full attention
         **kwargs,
@@ -245,6 +246,7 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
         self.use_ms3_motion = use_ms3_motion
         self.ms3_physics_override = ms3_physics_override
         self.use_ball_token = use_ball_token
+        self.use_ball_token_intrunk = use_ball_token_intrunk
         self.add_angular_velocity = add_angular_velocity
         if self.use_ms3_motion:
             self.ms3_deg = ms3_deg
@@ -362,6 +364,7 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
                                     num_motion_tokens=self.num_motion_tokens,
                                     use_time_token=self.use_time_token,
                                     use_sky_token=self.use_sky_token,
+                                    use_ball_token=self.use_ball_token_intrunk,
                                     use_affine_token=self.use_affine_token,
                                     concat_plucker_embed=self.concat_plucker_embed,
                                     add_patch_plucker_embed=self.add_patch_plucker_embed,
@@ -422,6 +425,13 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
                 self.ball_query = nn.Parameter(torch.randn(1, 1, 2 * embed_dim) * 0.02)
                 self.ball_block = Block(dim=2 * embed_dim, num_heads=16, use_cross_attn=True)
                 self.ball_head = Mlp(2 * embed_dim, 2 * embed_dim, 6)  # pos3 + vel3
+
+            # in-trunk 版：token 由 aggregator 内部产生（见 aggregator.py 的
+            # use_ball_token），这里只需要 LayerNorm + 读出头，不需要 query/cross-attn。
+            # 参数名与外挂版分开，两条路可以在同一个 backbone 上直接对比。
+            if self.use_ball_token_intrunk:
+                self.ball_token_norm = nn.LayerNorm(2 * embed_dim)
+                self.ball_head_intrunk = Mlp(2 * embed_dim, 2 * embed_dim, 6)  # pos3 + vel3
         else:
             # gs head
             self.dense_feats_dim = 256  # 256 is dpt default feature dim
@@ -1489,6 +1499,18 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
             others_last_tokens = last_tokens[:, :, :self.patch_start_idx]  # Exclude patch token
 
             sky_token, affine_tokens, motion_tokens, time_tokens = None, None, None, None
+            ball_token = None
+            # 切片顺序必须与 aggregator 的 concat 顺序倒序一致：
+            # concat 是 ... affine, sky, ball, patch，所以从尾巴切是 ball -> sky -> affine。
+            if self.use_ball_token_intrunk:
+                ball_token = others_last_tokens[:, :, -1:]
+                ball_token = self.ball_token_norm(ball_token)  # NOTE: token need LayerNorm
+                # 球状态的监督目标是最后一个 context 帧（terminal），所以这里无条件
+                # 只取 terminal 那一帧的 v 个视图再跨视图平均 —— 与 sky_token 不同，
+                # sky 是全局属性可以对所有帧平均，球的位置逐帧都不一样，平均掉就没意义了。
+                ball_token = ball_token[:, -v:].mean(1)   # [b, 1, c]
+                others_last_tokens = others_last_tokens[:, :, :-1]
+
             if self.use_sky_token:
                 sky_token = others_last_tokens[:, :, -1:]
                 sky_token = self.sky_token_norm(sky_token)  # NOTE: token need LayerNorm
@@ -1598,13 +1620,24 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
                     pred_task_semantic = self.forward_task_semantic_predictor(aggregated_last_tokens, shape=(h, w, t, v))
 
                 if self.use_ball_token:
+                    # 外挂版：aggregator 跑完之后再读，属于 post-hoc probe ——
+                    # 只能读 backbone 已算好的表征，改变不了 backbone 算什么。
                     # aggregated_last_tokens: [b, (t v), p, c=2*embed_dim]
                     _alt = rearrange(aggregated_last_tokens, "b (t v) p c -> b t v p c", t=t, v=v)
-                    # frame15 = 最后一个 context 帧的 terminal tokens：[b, v*p, c]
+                    # terminal 帧（最后一个 context 帧）的 tokens：[b, v*p, c]
                     _terminal = rearrange(_alt[:, -1], "b v p c -> b (v p) c")
                     _bq = repeat(self.ball_query, "1 1 c -> b 1 c", b=b)
                     _bf = self.ball_block(_bq, _terminal)  # cross-attn -> [b, 1, c]
                     _bo = self.ball_head(_bf.squeeze(1))    # [b, 6]
+                    ball_pos15 = _bo[:, :3]
+                    ball_v15 = _bo[:, 3:6]
+
+                # in-trunk 版：token 已经在 aggregator 里走完全部 attention 层，
+                # 这里只做读出。两个开关同时打开时以 in-trunk 为准（覆盖上面的结果），
+                # 但不要那样用 —— 两条路会同时收到 ball_pos/ball_vel 的梯度，
+                # 谁学到了什么就分不清了。
+                if self.use_ball_token_intrunk and ball_token is not None:
+                    _bo = self.ball_head_intrunk(ball_token.squeeze(1))   # [b, 6]
                     ball_pos15 = _bo[:, :3]
                     ball_v15 = _bo[:, 3:6]
             else:

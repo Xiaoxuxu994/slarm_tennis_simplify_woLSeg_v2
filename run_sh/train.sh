@@ -24,6 +24,12 @@ RESUME=0
 #
 # 另已知：误差 95.5% 在深度方向，语义选球不是瓶颈（pred≈gt mask）。细节见各 config 抬头。
 #
+# ── in-trunk ball token（8/29）──
+# ball token 改成 aggregator 的 special token（和 sky token 同等地位），走完全部
+# attention 层。回答 A/B 回答不了的问题：球的位置信息是 backbone 学不到，
+# 还是从来没人要求它学。从退火 ckpt 续训，不用重训 40k。
+# CONFIG="configs/exp0829_001_slarm_stream25_6.5cm_triview_window6_nolseg_balltoken_intrunk.yml"
+#
 # ── catch45 场景微调（新数据）──
 # 起点是退火终点，目前最好的 backbone。开跑前先做 config 抬头列的三项核对 + zero-shot 评测。
 # CONFIG="configs/exp0828_003_slarm_stream25_catch45_triview_window6_nolseg_finetune.yml"

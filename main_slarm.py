@@ -265,6 +265,10 @@ def get_args_parser():
     # 内建 ball token
     parser.add_argument("--use_ball_token", action="store_true")
     parser.add_argument("--ball_token_freeze_backbone", action="store_true")
+    parser.add_argument("--use_ball_token_intrunk", action="store_true",
+                        help="ball token as an aggregator special token (like sky/affine), "
+                             "so it goes through every attention layer and can shape the "
+                             "backbone. Do not enable together with --use_ball_token.")
     parser.add_argument("--stream25_ball_pos_weight", type=float, default=1.0)
     parser.add_argument("--stream25_ball_vel_weight", type=float, default=1.0)
     # MS3 physical normalization scales (spec 6.2) and the terminal dynamic split (spec 5.2).
@@ -666,7 +670,14 @@ def main(args):
     # 两阶段训练可选：冻结 backbone，只训 ball token 相关参数。
     # 必须在构建 optimizer 之前执行，否则冻结不生效。
     if getattr(args, "ball_token_freeze_backbone", False):
-        _ball_prefixes = ("ball_query", "ball_block", "ball_head")
+        # 外挂版 (ball_query/ball_block/ball_head) 与 in-trunk 版
+        # (aggregator.ball_token / ball_token_norm / ball_head_intrunk) 都要认。
+        # 注意：in-trunk 版配 freeze 在概念上是矛盾的 —— 把 token 放进 trunk 的
+        # 全部意义就是让梯度回到 backbone，冻住之后它退化成一个比外挂版还弱的
+        # probe（token 零初始化、只有读出头能学）。这里让它行为正确、不静默出错，
+        # 但不要这么用。
+        _ball_prefixes = ("ball_query", "ball_block", "ball_head",
+                          "ball_token_norm", "aggregator.ball_token")
         for _name, _p in model.named_parameters():
             if not _name.startswith(_ball_prefixes):
                 _p.requires_grad = False

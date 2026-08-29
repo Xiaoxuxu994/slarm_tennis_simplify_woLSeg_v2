@@ -62,6 +62,7 @@ class Aggregator(nn.Module):
         num_motion_tokens=0,
         use_time_token=False,
         use_sky_token=False,
+        use_ball_token=False,
         use_affine_token=False,
         concat_plucker_embed=True,
         add_patch_plucker_embed=True,
@@ -171,6 +172,7 @@ class Aggregator(nn.Module):
         # ------- auxiliary tokens -------
         self.use_time_token = use_time_token
         self.use_sky_token = use_sky_token
+        self.use_ball_token = use_ball_token
         self.use_affine_token = use_affine_token
 
         if self.use_time_token:
@@ -189,6 +191,21 @@ class Aggregator(nn.Module):
         if self.use_sky_token:
             self.patch_start_idx += 1
             self.sky_token = nn.Parameter(torch.randn(1, 1, embed_dim) * 0.0)
+
+        # in-trunk ball token：和 sky/affine 同等地位的 special token，参与全部
+        # alternating attention 层，与 patch token 双向交互。这一点是它和外挂版
+        # (slarm.py 的 ball_query + ball_block) 的本质区别 —— 外挂版只能读
+        # aggregator 算完的表征，改变不了 backbone 算什么。
+        #
+        # 必须放在 sky_token 之后（即最靠近 patch tokens），slarm.py 取回时按
+        # 尾部倒序切片，顺序必须与此处一致。
+        #
+        # 零初始化：加进来的 token 一开始是零向量，对已收敛 backbone 的 attention
+        # 扰动最小，因此可以直接从不带此 token 的 ckpt 续训（load_model 是
+        # strict=False，只有这一个参数会随机初始化）。与 sky_token 的做法一致。
+        if self.use_ball_token:
+            self.patch_start_idx += 1
+            self.ball_token = nn.Parameter(torch.randn(1, 1, embed_dim) * 0.0)
 
         # Register normalization constants as buffers
         for name, value in (
@@ -335,6 +352,10 @@ class Aggregator(nn.Module):
         if self.use_sky_token:
             sky_token = repeat(self.sky_token, "1 1 d -> b 1 d", b=b*t*v)
             tokens = torch.cat([tokens, sky_token], dim=1)
+        # 顺序必须与上面 patch_start_idx 的累加顺序、以及 slarm.py 的取回顺序一致
+        if self.use_ball_token:
+            ball_token = repeat(self.ball_token, "1 1 d -> b 1 d", b=b*t*v)
+            tokens = torch.cat([tokens, ball_token], dim=1)
 
         tokens = torch.cat([tokens, patch_tokens], dim=1)
 

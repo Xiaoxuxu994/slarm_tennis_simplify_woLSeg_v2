@@ -1,0 +1,138 @@
+# 6.5cm ball token · in-trunk 版：把 ball token 做成 aggregator 的 special token
+#
+# ─────────────────────────────────────────────────────────────
+# 这组要回答的问题，是 A/B 两组回答不了的那个：
+#   「表征里没有球的精确位置」，到底是 backbone 学不到，还是从来没人要求它学？
+#
+# 之前的 ball token 是外挂的 post-hoc probe：aggregator 跑完之后，
+# 一个 ball_query 通过 cross-attn 单向读取最终输出。它只能读 backbone 已经
+# 算好的东西，改变不了 backbone 算什么。
+#   A 组冻结 backbone = 纯 linear probe -> pos15 0.076 m，输给像素法 2.3x。
+#   B 组放开 backbone，但梯度要穿过外挂 block 才回到 trunk，路径长且弱。
+#
+# sky token 不是这么做的（aggregator.py:337）：它被 concat 进 token 序列，
+# 和 3600 个 patch token 一起走完全部 12 层 alternating attention，双向交互 ——
+# 既读 patch token，也通过 attention 影响它们。backbone 会为了天空这件事去
+# 组织表征。本组就是把 ball token 改成同样的地位。
+#
+# 判据（同一次 verify 里配对比较，同一批场景、同一组权重）：
+#   balltoken 那一路的 pos15_error 对 pred 那一路。
+#   要打赢的是退火后的像素法：frame24 0.026 / p95 0.070（200 场景完整评测）。
+#   这意味着需要 3.3x 的改善 —— in-trunk 提高的是上限，上限够不够未知。
+#
+# 不管输赢都能得到干净的结论：
+#   赢了  -> 球的位置信息可以被编码进表征，只是之前没人要求；
+#   输了  -> 换成 in-trunk 都读不出来，那这条路可以关掉了，
+#            该去修的是远帧小球的重建（ball_rgb_psnr.farthest / ball_iou）。
+# ─────────────────────────────────────────────────────────────
+#
+# 不需要从头训 40k：加一个 special token 不改变任何现有权重的形状
+#   （attention 权重与序列长度无关，RoPE 对 special token 一律给 pos=0），
+#   所以整个 aggregator 可以直接从退火 ckpt 加载，只有 aggregator.ball_token /
+#   ball_token_norm / ball_head_intrunk 三组是新初始化的。ball_token 是零初始化，
+#   接上去的第一步对 attention 的扰动为零。
+#
+# 两处接线上的坑（已在代码里处理，改动时别退回去）：
+#   1. aggregator.ball_token 的名字命中 "aggregator." 前缀，默认会掉进 trunk
+#      参数组吃 trunk_lr（head 的 1/5~1/10）。它是零初始化的新模块，那样学不起来。
+#      stream25_losses.py 的 _TRUNK_EXCEPTIONS 把它拉回 head 组。
+#   2. concat 顺序、patch_start_idx 累加顺序、slarm 的取回切片顺序三者必须一致。
+#      错一位会把 sky token 当 ball token 读出来 —— 形状合法、loss 也在降，
+#      只是降的不是你以为的东西。tests/models/test_ball_token_intrunk.py 守着这条。
+model: slarm
+dataset: [ball_catch_6.5cm_triview]
+data_root: data/SLARM_data_6.5
+
+input_size: [320, 240]
+patch_size: 8
+embed_dim: 768
+depth: 12
+patch_embed: conv
+num_max_cameras: 3
+num_context_timesteps: 6
+num_target_timesteps: 7
+context_stride: 3
+timespan: 0.8
+mode: window_6
+
+use_affine_token: true
+use_sky_token: true
+use_ms3_motion: true
+use_last_token: true
+shortcut_rgb: true
+add_patch_plucker_embed: true
+sigmoid_rgb: true
+num_motion_tokens: 0
+
+strict_data_loading: true
+enable_task_semantic_head: true
+terminal_context_extrapolation: true
+stream25_render_target_chunk_size: 7
+stream25_reconstruction_loss: true
+
+# ---- ball token：in-trunk（本实验主角）----
+use_ball_token: false            # ★ 外挂版关掉。两个都开会同时收到梯度，谁学到什么就分不清了
+use_ball_token_intrunk: true     # ★ in-trunk：aggregator 的 special token，走完全部 attention 层
+ball_token_freeze_backbone: false
+# ↑ 必须 false。in-trunk 配 freeze 在概念上是矛盾的 —— 把 token 放进 trunk 的全部
+#   意义就是让梯度回到 backbone，冻住之后它退化成一个比外挂版还弱的 probe。
+stream25_ball_pos_weight: 1.0
+stream25_ball_vel_weight: 1.0
+
+# ---- 损失权重：与 exp0827_003 逐项一致 ----
+# 只改结构和 LR。权重跟着动的话，重建退化就说不清是谁的锅。
+stream25_rgb_weight: 1.00
+stream25_lpips_weight: 0.05
+stream25_ball_rgb_weight: 0.50
+stream25_depth_relative_weight: 1.00
+stream25_ball_depth_metric_weight: 0.5
+stream25_semantic_weight: 1.00
+stream25_ms3_ball_weight: 1.00
+stream25_ms3_static_weight: 0.25
+stream25_opacity_weight: 0.10
+
+stream25_ms3_velocity_scale: 5.0
+stream25_ms3_acceleration_scale: 9.81
+stream25_ms3_jerk_scale: 1.0
+terminal_dynamic_velocity_threshold: 1.0
+stream25_semantic_class_weight_cap: 10.0
+
+# ---- 无 LSeg ----
+online_feat: false
+enable_feat_loss: false
+feat_loss_coeff: 0.0
+stream25_lseg_feature_weight: 0.0
+enable_depth_loss: true
+enable_sky_opacity_loss: true
+enable_perceptual_loss: true
+perceptual_weight: 0.05
+perceptual_loss_start_iter: 0
+load_depth: true
+
+# ---- 优化 ----
+# 起点是退火落定的收敛点，动它要很小心；但 ball_token / norm / head 是新初始化的，
+# 需要正常量级的 LR。这两个需求靠参数分组分开满足：
+#   head 组（含 ball_token，见上面的坑 1）= lr        -> 新模块学得起来
+#   trunk 组（backbone）                  = trunk_lr  -> 退火成果不被冲掉
+lr: 5.0e-5                   # 比 exp0827_002 的 3e-5 高一档：新模块要学
+stream25_trunk_lr: 2.0e-6    # 比例拉到 25:1，backbone 改得比任何一组都慢
+lr_sched: cosine             # ★ constant 是把 stage1 弄抖的元凶，不许改
+min_lr: 1.0e-7
+warmup_iters: 1000           # 保护退火后的 backbone 不被前几步的大梯度冲掉
+batch_size: 1
+seed: 20260829
+
+# ★ 起点：6.5cm 退火终点。ckpt 里没有 ball_* 权重，load_model 是 strict=False，
+#   那三组会新初始化 —— 这正是本实验想要的。
+load_from: work_dirs/slarm/exp0827_003_slarm_stream25_6.5cm_triview_window6_nolseg_anneal/checkpoints/ckpt_005999.pth
+
+train_annotation: scene_list/ball_catch_6.5cm_triview_train.txt
+eval_annotation: scene_list/ball_catch_6.5cm_triview_validation.txt
+num_iterations: 15000
+ckpt_every_n_iters: 1000
+vis_every_n_iters: 3000
+num_vis_samples: 1
+eval_every_n_iters: 50000
+keep_n_ckpts: 15
+project: slarm
+exp_name: exp0829_001_slarm_stream25_6.5cm_triview_window6_nolseg_balltoken_intrunk
