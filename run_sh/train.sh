@@ -3,8 +3,19 @@ set -euo pipefail
 
 # 通用训练启动：单卡走 python，多卡自动走 torchrun。
 # GPUS 里写几张卡就用几张；命令行额外参数会透传给 main_slarm.py。
-
-GPUS="4,5,6,7"
+#
+# ★ 卡数是实验口径的一部分，不要顺手改。
+#   batch_size 是 per-GPU，全局 batch = batch_size x 卡数，代码里没有梯度累积
+#   （main_slarm.py:702，全仓库无 accum_iter），而且各 config 都写死了 lr，
+#   `if args.lr is None: args.lr = args.blr * global_batch_size / 256` 这条
+#   自动缩放不会触发 —— 所以卡数减半 = 全局 batch 减半 + 每样本步长翻倍，
+#   两个变量一起动。
+#
+#   6.5cm 这一系列（exp0827_003 退火 / exp0827_001,002 A-B / exp0829_001 in-trunk）
+#   全部是 2 卡跑的，互相可比。改成别的卡数，跟这些的横比就不成立了。
+#   核实某次实验实际用了几张：
+#       grep "Global batch size" work_dirs/slarm/<exp_name>/logs/log.txt
+GPUS="0,1"
 CONFIG="configs/exp0814_slarm_stream25_24cm_triview_window6_reproduce.yaml"
 # CONFIG="configs/slarm_stream25_24cm_triview_window6.yaml"
 
