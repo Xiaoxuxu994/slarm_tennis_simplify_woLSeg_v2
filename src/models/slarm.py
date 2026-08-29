@@ -1705,7 +1705,11 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
         if not self.training and self.save_rendered_pc and stream_save:
             self.save_rendered_pointcloud(data_dict, output, save_path=self.rendered_pc_save_path)
 
-        if self.use_ball_token:
+        # 两种 ball token 都要把结果放进 output —— 损失侧的开关是
+        # `if "ball_pos15" in output`（stream25_losses.py:410），不是 config 标志。
+        # 这里只认 use_ball_token 的话，in-trunk 模式下预测会被算出来然后丢掉，
+        # 监督整个不触发，而且没有任何报错：日志里只是少了几个键。
+        if self.use_ball_token or self.use_ball_token_intrunk:
             output["ball_pos15"] = ball_pos15
             output["ball_v15"] = ball_v15
 

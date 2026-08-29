@@ -357,7 +357,9 @@ def main():
             print(f"{'balltoken':8s} {label:16s} {med:10.4f} {p95:10.4f} {n:8d}")
         print("=" * 72)
     else:
-        print("[note] 模型无内建 ball token（config 未开 use_ball_token），跳过 balltoken 对比")
+        print("[note] no ball token output in this checkpoint "
+              "(neither use_ball_token nor use_ball_token_intrunk produced ball_pos15); "
+              "skipping the balltoken comparison")
         print("=" * 72)
 
     print("Readout:")

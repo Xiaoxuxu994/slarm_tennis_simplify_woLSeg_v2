@@ -193,6 +193,44 @@ def test_ball_token_is_read_before_sky():
     assert 0 < ball < sky, "in-trunk ball token must be read back before sky token"
 
 
+# ---------------------------------------------------------------- 输出接线
+def test_ball_prediction_is_written_to_output_for_both_variants():
+    """output["ball_pos15"] 的守卫必须同时认两个开关。
+
+    损失侧的触发条件是 `if "ball_pos15" in output`（stream25_losses.py），
+    不是 config 标志。所以这个守卫只认 use_ball_token 的话，in-trunk 模式下
+    预测会被算出来然后原地丢掉 —— 监督整个不触发，训练照常跑完，
+    日志里只是少了 stream25_ball_pos_loss 那几个键，没有任何报错。
+    这正是本分支实际发生过的一次事故（4750 步全部白跑）。
+    """
+    src = (WORKTREE / "src/models/slarm.py").read_text(encoding="utf-8")
+    pos = src.find('output["ball_pos15"] = ball_pos15')
+    assert pos > 0, 'slarm.py never writes output["ball_pos15"]'
+
+    # 往回找最近的 if，取它整行作为守卫条件
+    guard_start = src.rfind("if ", 0, pos)
+    guard = src[guard_start:src.find("\n", guard_start)]
+    assert "use_ball_token" in guard and "use_ball_token_intrunk" in guard, (
+        f'the guard around output["ball_pos15"] is `{guard.strip()}` -- it must accept '
+        "both the external and the in-trunk variant, otherwise one of them silently "
+        "computes the prediction and discards it")
+
+
+def test_loss_triggers_on_output_key_not_on_a_config_flag():
+    """损失侧必须按 output 里有没有 key 判断，而不是读 config 开关。
+
+    按 key 判断意味着新增第三种 ball token 实现时，只要把结果写进 output 就自动
+    接上监督；按 config 判断则每加一种都要记得改损失，漏了就是静默失败。
+    """
+    src = (WORKTREE / "src/utils/stream25_losses.py").read_text(encoding="utf-8")
+    pos = src.find("ball_pos_loss = F.smooth_l1_loss")
+    assert pos > 0, "ball_pos loss not found in stream25_losses.py"
+    guard_start = src.rfind('if "ball_pos15" in output', 0, pos)
+    assert guard_start > 0, (
+        "the ball loss must be guarded by `if \"ball_pos15\" in output`, not by a "
+        "config flag -- a flag has to be updated for every new variant")
+
+
 # ---------------------------------------------------------------- 形状
 @needs_torch
 def test_patch_start_idx_shifts_by_exactly_one():
