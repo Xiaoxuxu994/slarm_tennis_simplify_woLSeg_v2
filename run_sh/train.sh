@@ -35,6 +35,10 @@ RESUME=0
 #
 # 另已知：误差 95.5% 在深度方向，语义选球不是瓶颈（pred≈gt mask）。细节见各 config 抬头。
 #
+# ── 真实场景 GS 渲染数据（新 domain，不带 ball token）──
+# 起点是退火终点。开跑前四步写在 config 抬头：契约检查 / 速度自洽 / zero-shot 定 LR / 初始化自检。
+# CONFIG="configs/exp0901_001_slarm_stream25_realgs_triview_window6_nolseg_finetune.yml"
+#
 # ── in-trunk ball token（8/29）──
 # ball token 改成 aggregator 的 special token（和 sky token 同等地位），走完全部
 # attention 层。回答 A/B 回答不了的问题：球的位置信息是 backbone 学不到，

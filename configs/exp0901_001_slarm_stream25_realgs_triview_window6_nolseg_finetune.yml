@@ -1,0 +1,142 @@
+# 真实场景 GS 渲染数据 · 6.5cm 小球 · 迁移微调（不带 ball token）
+#
+# ═══════════════════════════════════════════════════════════════
+# 起点：exp0827_003 退火终点 ckpt_005999 —— 目前最好的 backbone。
+#   200 场景完整评测：frame24 0.026/0.070，球深度 far 0.013/0.033，
+#   球 IoU far 0.742，RGB PSNR 34.68/33.78。它也全面超过 wLSeg 的 exp003。
+#
+# ★ lr_sched 必须是 cosine，这条不许改。
+#   stage1 用 constant 跑满 40k，pos15 在 0.031~0.111 之间摆 3.5×，没有收敛点；
+#   补 6k 步 cosine 之后立刻落定并大幅变好。这是这轮最大的收获。
+#
+# ★ 不开 ball token。三种配置（外挂+冻结 2.29×、in-trunk 3.19×）都输给像素法，
+#   而且 in-trunk 让球区域远帧深度退化 51%。新 domain 的迁移不该带上一个未证实的模块 ——
+#   先把像素法这条路在新数据上立住，ball token 的事回到 6.5cm 仿真数据上单独验。
+# ═══════════════════════════════════════════════════════════════
+#
+# ── 开跑前的四步，一步都别跳 ──────────────────────────────────
+#
+# 1) 数据契约 + 可见性分布
+#      python tools/check_dataset_contract.py --data-root <DATA_ROOT> --limit 10
+#      python tools/check_dataset_contract.py --data-root <DATA_ROOT> --visibility-summary
+#    重点看：dataset 字段（要与下面和 constants.py 三处一致）、重力自洽（决定 timespan）、
+#    frame 15 那行和 all-blind 那列。context 帧三视图全盲的场景是落点指标里的纯噪声，
+#    先从 scene_list 剔掉再训 —— v3_0829 抽 5 个中了 2 个，这类问题要当默认存在来查。
+#
+# 2) 速度标注自洽
+#    checker 若报 "velocity_rig disagrees with the position difference"，
+#    看中位差多大。参照：退火后模型的 v15 误差是 0.056 m/s，标注差 0.335 m/s 就意味着
+#    噪声比模型误差大 6 倍。位置通过重力检验的话，速度可以从位置差分无损重算，
+#    不必等数据方重导。
+#
+# 3) zero-shot 评测定 LR（用 run_sh/eval.sh，本 config + 退火的 ckpt）
+#      frame24 > 0.3、语义分不出球  -> 大 domain shift，lr 提到 1.0e-4
+#      frame24 0.05 ~ 0.15          -> 下面的 5e-5 正合适
+#      frame24 < 0.05               -> 小 shift，lr 降到 2e-5、步数减半
+#    真实场景 GS 渲染相对仿真的主要差异在外观（真实纹理、光照、GS 的 floater 与
+#    视角依赖伪影），几何契约不变，所以预期是中等 shift。
+#
+# 4) 模型初始化自检
+#      python tools/check_model_init.py --config <本文件>
+#    missing 应当为空（本 config 不加任何新模块），unexpected 也应为 0，
+#    契约对比应显示 identical。任何一项不符都说明起点或 config 有问题。
+#
+# ── GS 渲染数据特有的一处调整 ────────────────────────────────
+#
+# 下面把 stream25_depth_relative_weight 从 1.00 降到 0.50，理由：
+#   3DGS 渲染的深度是 alpha 加权的期望深度，在物体边缘、薄结构、半透明区域
+#   系统性偏移（介于前后表面之间），而仿真数据的深度是精确的 z-buffer。
+#   拿它当 1.0 权重的稠密监督，等于让模型去拟合渲染器的伪影。
+#
+#   球的深度是另一回事：球心位置由几何精确给出，所以
+#   stream25_ball_depth_metric_weight 维持 0.5 不降 —— 那才是落点真正依赖的量。
+#
+#   ★ 如果新数据的深度图不是来自 GS 渲染，而是几何 z-buffer 导出的，
+#     把它改回 1.00。这一条要先确认数据是怎么产的。
+model: slarm
+dataset: [<DATASET_NAME>]            # ★ 必须与标注 JSON 的 "dataset" 字段逐字一致
+data_root: <DATA_ROOT>               # ★ 例 data/slarm_data_realgs
+
+input_size: [320, 240]
+patch_size: 8
+embed_dim: 768
+depth: 12
+patch_embed: conv
+num_max_cameras: 3
+num_context_timesteps: 6
+num_target_timesteps: 7
+context_stride: 3
+timespan: 0.8                        # ★ 用 checker 的重力检查确认，别照抄
+mode: window_6
+
+use_affine_token: true
+use_sky_token: true
+use_ms3_motion: true
+use_last_token: true
+shortcut_rgb: true
+add_patch_plucker_embed: true
+sigmoid_rgb: true
+num_motion_tokens: 0
+
+strict_data_loading: true
+enable_task_semantic_head: true
+terminal_context_extrapolation: true
+stream25_render_target_chunk_size: 7
+stream25_reconstruction_loss: true
+
+# ---- 不开 ball token ----
+use_ball_token: false
+use_ball_token_intrunk: false
+
+# ---- 损失权重 ----
+stream25_rgb_weight: 1.00
+stream25_lpips_weight: 0.05
+stream25_ball_rgb_weight: 0.50
+stream25_depth_relative_weight: 0.50   # ★ GS 渲染深度不可全信，见抬头；z-buffer 则改回 1.00
+stream25_ball_depth_metric_weight: 0.5 # 球深度来自几何，可信，不降
+stream25_semantic_weight: 1.00
+stream25_ms3_ball_weight: 1.00
+stream25_ms3_static_weight: 0.25
+stream25_opacity_weight: 0.10
+
+stream25_ms3_velocity_scale: 5.0
+stream25_ms3_acceleration_scale: 9.81
+stream25_ms3_jerk_scale: 1.0
+terminal_dynamic_velocity_threshold: 1.0
+stream25_semantic_class_weight_cap: 10.0
+
+# ---- 无 LSeg ----
+online_feat: false
+enable_feat_loss: false
+feat_loss_coeff: 0.0
+stream25_lseg_feature_weight: 0.0
+enable_depth_loss: true
+enable_sky_opacity_loss: true
+enable_perceptual_loss: true
+perceptual_weight: 0.05
+perceptual_loss_start_iter: 0
+load_depth: true
+
+# ---- 优化 ----
+# 起点是退火落定的收敛点，backbone 是这次最该保护的资产（6k 步换来 32% 改善）。
+# 新 domain 的差异主要在外观，靠 head 适应即可，trunk 只需微调。
+lr: 5.0e-5
+stream25_trunk_lr: 5.0e-6            # 10:1，比同域微调压得更狠
+lr_sched: cosine                     # ★ 不许改
+min_lr: 1.0e-7
+warmup_iters: 1000
+batch_size: 1                        # per-GPU；卡数是实验口径的一部分，与前几组保持一致（2 卡）
+seed: 20260901
+
+load_from: work_dirs/slarm/exp0827_003_slarm_stream25_6.5cm_triview_window6_nolseg_anneal/checkpoints/ckpt_005999.pth
+
+train_annotation: scene_list/<DATASET_NAME>_train.txt          # ★ 与实际文件名核对
+eval_annotation: scene_list/<DATASET_NAME>_validation.txt      # ★ 与实际文件名核对
+num_iterations: 20000                # cosine 按这个长度铺开，中途改会让曲线跳变
+ckpt_every_n_iters: 2000
+vis_every_n_iters: 4000
+num_vis_samples: 1
+eval_every_n_iters: 50000
+keep_n_ckpts: 10
+project: slarm
+exp_name: exp0901_001_slarm_stream25_realgs_triview_window6_nolseg_finetune
