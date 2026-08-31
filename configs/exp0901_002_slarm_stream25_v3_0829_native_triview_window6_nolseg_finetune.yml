@@ -1,0 +1,167 @@
+# v3_0829 原生分辨率（480 宽 x 640 高）· 6.5cm 小球 · 迁移微调（不带 ball token）
+#
+# ═══════════════════════════════════════════════════════════════
+# 与 exp0901_001（240x320）逐键相同，只差分辨率与随之而来的显存让步。
+#
+# ★ input_size 是 (H, W)。240x320 那版写 [320, 240]，翻倍就是 [640, 480]。
+#   datasets.py:437-438 是 fx_px = fx_norm * input_size[1](W)、
+#   fy_px = fy_norm * input_size[0](H)，写反会让内参两个方向互换 ——
+#   几何全错，而且不会报任何错。核对：
+#       fx_px = 1.0723 * 480 = 514.7      fy_px = 0.8042 * 640 = 514.7
+#   两者相等（方形像素）就是对的。
+#
+# ★ 分辨率翻倍的代价比直觉大：
+#       patch 数  (320/8)x(240/8)=1200  ->  (640/8)x(480/8)=4800     4 倍
+#       global attention 是 O(N^2)，N 是 t*v*P               约 16 倍
+#   显存和时间都会炸。下面做了三处让步，按实际情况再调：
+#       stream25_render_target_chunk_size  7 -> 2   渲染分块，最直接省显存
+#       num_iterations                 20000 -> 12000   单步更贵，同等预算下步数要减
+#       lr / trunk_lr                    维持不变   分辨率不改变优化的性质
+#   还不够就加 --disable_grad_checkpointing 的反面（默认已开 checkpointing），
+#   或者把 chunk 降到 1。
+#
+# ★ 起点仍是 6.5cm 退火 ckpt（240x320 上训的）。ViT 的 patch embed 和 attention
+#   与分辨率无关，RoPE 按实际 patch 网格生成，所以权重可以直接加载 ——
+#   但模型没见过这个尺度的 patch 网格，前几千步会有适应期，warmup 保持 1000 不要减。
+#   跑之前用 tools/check_model_init.py 确认 missing/unexpected 都是 0。
+# ═══════════════════════════════════════════════════════════════
+#
+# ── 这批数据有三件事必须先做完，config 填好不等于能跑 ──────────
+#
+#   ① scene_list 格式（阻塞级）：每行是 "scene_6329" 而不是 JSON 路径，
+#      而 datasets.py:192 直接 open(join(data_root, line))，训练第一步就会失败。
+#          python tools/fix_scene_list.py --data-root data/slarm_data
+#          python tools/fix_scene_list.py --data-root data/slarm_data --write
+#
+#   ② 可见性（决定这批数据能不能用）：抽查 5 个场景，2 个出现某个 context 帧
+#      三视图全盲，其中一个是 frame 15 —— 那是物理外推的锚点，这类场景在
+#      frame24 指标里是纯噪声。跑全量分布，把它们从 scene_list 剔掉再训：
+#          python tools/check_dataset_contract.py --data-root data/slarm_data --visibility-summary
+#          python tools/check_dataset_contract.py --data-root data/SLARM_data_6.5 --visibility-summary   # 对照
+#
+#   ③ 速度标注：scene_6333 的 velocity_rig 与位置差分相差 0.335 m/s，
+#      而退火后模型的 v15 误差是 0.056 m/s —— 标注噪声比模型误差大 6 倍。
+#      位置已通过重力检验，所以坏的是速度，可从位置中心差分无损重算。
+#          python tools/check_dataset_contract.py --data-root data/slarm_data \
+#              --limit 0 --no-images 2>&1 | grep -c "velocity_rig disagrees"
+#
+# ── 已核对 ────────────────────────────────────────────────────
+#   dataset 名 = ball_catch_triview_v3_0829，constants.py 两处已注册（ca96838）
+#   timespan   = 0.8，重力自洽检查通过
+#
+# ── 开跑前还要做的两步 ────────────────────────────────────────
+#
+# 1) zero-shot 评测定 LR（用 run_sh/eval.sh，本 config + 退火的 ckpt）
+#      frame24 > 0.3、语义分不出球  -> 大 domain shift，lr 提到 1.0e-4
+#      frame24 0.05 ~ 0.15          -> 下面的 5e-5 正合适
+#      frame24 < 0.05               -> 小 shift，lr 降到 2e-5、步数减半
+#    真实场景 GS 渲染相对仿真的主要差异在外观（真实纹理、光照、GS 的 floater 与
+#    视角依赖伪影），几何契约不变，所以预期是中等 shift。
+#
+# 2) 模型初始化自检
+#      python tools/check_model_init.py --config <本文件>
+#    missing 应当为空（本 config 不加任何新模块），unexpected 也应为 0，
+#    契约对比应显示 identical。任何一项不符都说明起点或 config 有问题。
+#
+# ── 关于 stream25_depth_relative_weight ──────────────────────
+#
+# 这里用 1.00，与 exp0825_002 / exp0827_003 一致 —— 不确定时跟已验证的配置走，
+# 不为一个没确认的假设调参。
+#
+# ★ 但如果 v3_0829 的深度图是 3DGS 渲染出来的（而非仿真的 z-buffer），
+#   要降到 0.50。理由：GS 渲染的深度是 alpha 加权的期望深度，在物体边缘、
+#   薄结构、半透明区域系统性地落在前后表面之间；拿它当 1.0 权重的稠密监督，
+#   等于让模型去拟合渲染器的伪影。
+#
+#   怎么判断：看数据是怎么产的。或者跑一次 zero-shot 评测，
+#   若 depth_absrel 明显高于 6.5cm 仿真数据的 0.019，多半就是渲染深度。
+#
+#   球深度（stream25_ball_depth_metric_weight）无论哪种情况都维持 0.5：
+#   球心位置由几何精确给出，那才是落点真正依赖的量。
+model: slarm
+dataset: [ball_catch_triview_v3_0829_native]
+data_root: data/slarm_data_native
+
+input_size: [640, 480]     # ★ (H, W)，见抬头
+patch_size: 8
+embed_dim: 768
+depth: 12
+patch_embed: conv
+num_max_cameras: 3
+num_context_timesteps: 6
+num_target_timesteps: 7
+context_stride: 3
+timespan: 0.8                        # checker 的重力自洽检查已通过
+mode: window_6
+
+use_affine_token: true
+use_sky_token: true
+use_ms3_motion: true
+use_last_token: true
+shortcut_rgb: true
+add_patch_plucker_embed: true
+sigmoid_rgb: true
+num_motion_tokens: 0
+
+strict_data_loading: true
+enable_task_semantic_head: true
+terminal_context_extrapolation: true
+stream25_render_target_chunk_size: 2   # ★ 分辨率翻倍，降分块省显存
+stream25_reconstruction_loss: true
+
+# ---- 不开 ball token ----
+use_ball_token: false
+use_ball_token_intrunk: false
+
+# ---- 损失权重 ----
+stream25_rgb_weight: 1.00
+stream25_lpips_weight: 0.05
+stream25_ball_rgb_weight: 0.50
+stream25_depth_relative_weight: 1.00   # ★ 若深度图来自 GS 渲染而非 z-buffer，降到 0.50，见抬头
+stream25_ball_depth_metric_weight: 0.5 # 球深度来自几何，可信，不降
+stream25_semantic_weight: 1.00
+stream25_ms3_ball_weight: 1.00
+stream25_ms3_static_weight: 0.25
+stream25_opacity_weight: 0.10
+
+stream25_ms3_velocity_scale: 5.0
+stream25_ms3_acceleration_scale: 9.81
+stream25_ms3_jerk_scale: 1.0
+terminal_dynamic_velocity_threshold: 1.0
+stream25_semantic_class_weight_cap: 10.0
+
+# ---- 无 LSeg ----
+online_feat: false
+enable_feat_loss: false
+feat_loss_coeff: 0.0
+stream25_lseg_feature_weight: 0.0
+enable_depth_loss: true
+enable_sky_opacity_loss: true
+enable_perceptual_loss: true
+perceptual_weight: 0.05
+perceptual_loss_start_iter: 0
+load_depth: true
+
+# ---- 优化 ----
+# 起点是退火落定的收敛点，backbone 是这次最该保护的资产（6k 步换来 32% 改善）。
+# 新 domain 的差异主要在外观，靠 head 适应即可，trunk 只需微调。
+lr: 5.0e-5
+stream25_trunk_lr: 5.0e-6            # 10:1，比同域微调压得更狠
+lr_sched: cosine                     # ★ 不许改
+min_lr: 1.0e-7
+warmup_iters: 1000
+batch_size: 1                        # per-GPU；卡数是实验口径的一部分，与前几组保持一致（2 卡）
+seed: 20260902
+
+load_from: work_dirs/slarm/exp0827_003_slarm_stream25_6.5cm_triview_window6_nolseg_anneal/checkpoints/ckpt_005999.pth
+
+train_annotation: scene_list/ball_catch_triview_v3_0829_native_train.txt
+eval_annotation: scene_list/ball_catch_triview_v3_0829_native_validation.txt
+num_iterations: 12000                # cosine 按这个长度铺开，中途改会让曲线跳变
+ckpt_every_n_iters: 2000
+vis_every_n_iters: 4000
+num_vis_samples: 1
+eval_every_n_iters: 50000
+keep_n_ckpts: 10
+project: slarm
+exp_name: exp0901_002_slarm_stream25_v3_0829_native_triview_window6_nolseg_finetune

@@ -28,6 +28,8 @@ DATASETS = {
     # 但球加速度的二阶差分仍等于重力，说明 rig 系依然是惯性系（相机相对固定 rig 运动，
     # 或 rig 匀速直线运动），物理外推照常成立，这两个矩阵不受影响。
     "ball_catch_triview_v3_0829": {"opencv2dataset": opencv2waymo, "canonical_to_flu": np.eye(4)},
+    # 同一批数据的原生分辨率版本（480 宽 x 640 高）。坐标约定不随分辨率变化。
+    "ball_catch_triview_v3_0829_native": {"opencv2dataset": opencv2waymo, "canonical_to_flu": np.eye(4)},
 }
 
 waymo_train = "scene_list/waymo_train.txt"  # NOTE: Use full data for multi-GPU
@@ -226,6 +228,32 @@ DATASET_DICT = {
         "num_target_timesteps": 7,
         "annotation_txt_file_train": "scene_list/ball_catch_triview_v3_0829_train.txt",
         "annotation_txt_file_val": "scene_list/ball_catch_triview_v3_0829_validation.txt",
+        "camera_list": {
+            2: ["front_left", "front_right"],
+            3: ["front_left", "front_right", "lower_front"],
+        },
+        "ref_camera": "front_left",
+    },
+
+    # v3_0829 的原生分辨率版本（data_root: data/slarm_data_native）。
+    #
+    # ★ size 是 (H, W) 不是 (W, H)。datasets.py:437-438 用
+    #       fx_px = fx_norm * target_size[1]   (W)
+    #       fy_px = fy_norm * target_size[0]   (H)
+    #   而 transforms.Resize(target_size) 按 torchvision 约定收 (h, w)。
+    #   240x320 那版是 [320, 240] = 320 高 240 宽的竖屏，翻倍就是 [640, 480]。
+    #   写反的话内参的两个方向会互换，几何全错而且不会报错。
+    #
+    # ★ normalized_intrinsics 与分辨率无关，原样复用即可：
+    #       fx_px = 1.0723 * 480 = 514.7
+    #       fy_px = 0.8042 * 640 = 514.7      两者仍相等（方形像素）
+    "ball_catch_triview_v3_0829_native": {
+        "size": [640, 480],
+        "temporal": True,
+        "num_context_timesteps": 6,
+        "num_target_timesteps": 7,
+        "annotation_txt_file_train": "scene_list/ball_catch_triview_v3_0829_native_train.txt",
+        "annotation_txt_file_val": "scene_list/ball_catch_triview_v3_0829_native_validation.txt",
         "camera_list": {
             2: ["front_left", "front_right"],
             3: ["front_left", "front_right", "lower_front"],

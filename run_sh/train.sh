@@ -39,6 +39,9 @@ RESUME=0
 # 起点是退火终点。★ 开跑前 config 抬头列了三件必须先做完的数据侧工作
 #   （scene_list 格式 / 可见性筛选 / 速度标注），config 填好不等于能跑。
 # CONFIG="configs/exp0901_001_slarm_stream25_v3_0829_triview_window6_nolseg_finetune.yml"
+# 原生分辨率版（480 宽 x 640 高）。patch 数 4 倍、global attention 约 16 倍，
+# 已把 render chunk 降到 2、步数减到 12k；显存还不够就把 chunk 降到 1。
+# CONFIG="configs/exp0901_002_slarm_stream25_v3_0829_native_triview_window6_nolseg_finetune.yml"
 #
 # ── in-trunk ball token（8/29）──
 # ball token 改成 aggregator 的 special token（和 sky token 同等地位），走完全部
