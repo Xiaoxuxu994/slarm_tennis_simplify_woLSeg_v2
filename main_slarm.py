@@ -628,7 +628,8 @@ def main(args):
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         pin_memory=False,
-        persistent_workers=True,
+        # num_workers=0 时 persistent_workers=True 会 ValueError，而单步调试必须用 0
+        persistent_workers=args.num_workers > 0,
         drop_last=True,
     )
 
@@ -645,7 +646,7 @@ def main(args):
             num_workers=args.num_workers,
             sampler=sampler,
             pin_memory=False,
-            persistent_workers=True,
+            persistent_workers=args.num_workers > 0,
             shuffle=False,
             drop_last=False,
         )
@@ -655,7 +656,7 @@ def main(args):
             num_workers=args.num_workers,
             sampler=sampler,
             pin_memory=False,
-            persistent_workers=True,
+            persistent_workers=args.num_workers > 0,
             shuffle=False,
             drop_last=False,
         )

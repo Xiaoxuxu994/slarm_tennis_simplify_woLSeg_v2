@@ -1,0 +1,161 @@
+{
+  // SLARM 单步调试配置 —— 模板。仓库的 .gitignore 忽略 .vscode/，所以放在 docs 下。
+  //
+  //   mkdir -p .vscode && cp docs/vscode-launch.example.json .vscode/launch.json
+  //
+  // 复制过去之后按需改 config 路径和 ckpt 路径。
+  //
+  //
+  // 三个关键设置，缺一个就走不动：
+  //   SLARM_SINGLE_PROCESS=1  绕过 torchrun/NCCL（main_slarm.py:430），否则要多进程启动，调试器接不上
+  //   --num_workers 0         数据在主进程里加载，dataloader 的断点才进得去
+  //   justMyCode: false       允许步进到 torch / einops / gsplat 内部
+  //
+  // 每个配置都写死了 --exp_name debug_*，产物落在 work_dirs/slarm/debug_* 下，
+  // 不会污染正式实验目录。
+  "version": "0.2.0",
+  "configurations": [
+    {
+      // ★ 主用这个。跑 2 个 iteration 就退出，走完 数据 -> 网络 -> 损失 -> 反传 -> 优化 全链路。
+      "name": "Train · 单步全链路",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main_slarm.py",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "SLARM_SINGLE_PROCESS": "1",
+        "CUDA_VISIBLE_DEVICES": "0",
+        "PYTHONPATH": "${workspaceFolder}",
+        "CUDA_LAUNCH_BLOCKING": "1"
+      },
+      "args": [
+        "--config=configs/exp0827_003_slarm_stream25_6.5cm_triview_window6_nolseg_anneal.yml",
+        "--num_workers", "0",
+        "--num_iterations", "2",
+        "--exp_name", "debug_train",
+        "--log_every_n_iters", "1",
+        "--ckpt_every_n_iters", "999999",
+        "--vis_every_n_iters", "999999",
+        "--eval_every_n_iters", "999999"
+      ]
+    },
+    {
+      // 不加载 ckpt，最快到达第一个断点（省掉几十秒的权重载入）。
+      // 权重是随机的，看数值没意义，看流程和张量形状足够。
+      "name": "Train · 跳过 ckpt（最快）",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main_slarm.py",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "SLARM_SINGLE_PROCESS": "1",
+        "CUDA_VISIBLE_DEVICES": "0",
+        "PYTHONPATH": "${workspaceFolder}",
+        "CUDA_LAUNCH_BLOCKING": "1"
+      },
+      "args": [
+        "--config=configs/exp0827_003_slarm_stream25_6.5cm_triview_window6_nolseg_anneal.yml",
+        "--load_from", "",
+        "--num_workers", "0",
+        "--num_iterations", "2",
+        "--exp_name", "debug_train_scratch",
+        "--log_every_n_iters", "1",
+        "--ckpt_every_n_iters", "999999",
+        "--vis_every_n_iters", "999999",
+        "--eval_every_n_iters", "999999"
+      ]
+    },
+    {
+      // 带 in-trunk ball token 的版本：多走 aggregator 的 ball token concat
+      // 和 slarm 的取回切片两段。调 ball token 相关代码时用这个。
+      "name": "Train · in-trunk ball token",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main_slarm.py",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "SLARM_SINGLE_PROCESS": "1",
+        "CUDA_VISIBLE_DEVICES": "0",
+        "PYTHONPATH": "${workspaceFolder}",
+        "CUDA_LAUNCH_BLOCKING": "1"
+      },
+      "args": [
+        "--config=configs/exp0829_001_slarm_stream25_6.5cm_triview_window6_nolseg_balltoken_intrunk.yml",
+        "--num_workers", "0",
+        "--num_iterations", "2",
+        "--exp_name", "debug_balltoken",
+        "--log_every_n_iters", "1",
+        "--ckpt_every_n_iters", "999999",
+        "--vis_every_n_iters", "999999",
+        "--eval_every_n_iters", "999999"
+      ]
+    },
+    {
+      // 评测链路：渲染 -> 逐帧逐视角指标 -> 时间桶聚合 -> acceptance gate。
+      // --limit 2 只跑两个场景。
+      "name": "Eval · 评测链路",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/eval_stream25_base.py",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "SLARM_SINGLE_PROCESS": "1",
+        "CUDA_VISIBLE_DEVICES": "0",
+        "PYTHONPATH": "${workspaceFolder}"
+      },
+      "args": [
+        "--config", "configs/exp0827_003_slarm_stream25_6.5cm_triview_window6_nolseg_anneal.yml",
+        "--checkpoint", "work_dirs/slarm/exp0827_003_slarm_stream25_6.5cm_triview_window6_nolseg_anneal/checkpoints/ckpt_005999.pth",
+        "--split", "validation",
+        "--limit", "2",
+        "--output", "work_dirs/slarm/debug_eval/evaluation.json"
+      ]
+    },
+    {
+      // 落点外推：像素法 vs ball token 的配对比较在这里算。
+      "name": "Verify · 物理外推",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/tools/verify_physics_extrapolation.py",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "SLARM_SINGLE_PROCESS": "1",
+        "CUDA_VISIBLE_DEVICES": "0",
+        "PYTHONPATH": "${workspaceFolder}"
+      },
+      "args": [
+        "--config", "configs/exp0827_003_slarm_stream25_6.5cm_triview_window6_nolseg_anneal.yml",
+        "--checkpoint", "work_dirs/slarm/exp0827_003_slarm_stream25_6.5cm_triview_window6_nolseg_anneal/checkpoints/ckpt_005999.pth",
+        "--split", "validation",
+        "--limit", "2",
+        "--ball-mask-source", "pred"
+      ]
+    },
+    {
+      // 纯 CPU、不碰模型：数据契约检查。想看 JSON 怎么被解析成场景时用这个。
+      "name": "Data · 契约检查（CPU）",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/tools/check_dataset_contract.py",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "cwd": "${workspaceFolder}",
+      "env": { "PYTHONPATH": "${workspaceFolder}" },
+      "args": [
+        "--data-root", "data/SLARM_data_6.5",
+        "--limit", "2",
+        "--show-pass"
+      ]
+    }
+  ]
+}
