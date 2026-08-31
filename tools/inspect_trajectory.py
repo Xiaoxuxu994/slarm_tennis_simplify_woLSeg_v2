@@ -39,11 +39,31 @@ JUMP_TOL = 3.0
 def _load(p: Path):
     js = json.loads(p.read_text(encoding="utf-8"))
     fr = js["ball_trajectory"]["frames"]
-    t = js["normalized_time"]
-    dt = float(t[1]) - float(t[0])
+    t = [float(x) for x in js["normalized_time"]]
+    dt = t[1] - t[0]
     P = [f["position_rig"] for f in fr]
     V = [f["velocity_rig"] for f in fr]
-    return P, V, dt
+    return P, V, dt, t
+
+
+def _dt_uniformity(t):
+    """时间戳是否等间隔。不等间隔的话，任何用固定 dt 的推导都是错的 ——
+    这要在怀疑位置或速度之前先排除。"""
+    d = [t[i + 1] - t[i] for i in range(len(t) - 1)]
+    lo, hi = min(d), max(d)
+    mean = sum(d) / len(d)
+    return lo, hi, mean, (hi - lo) / mean if mean else float("inf")
+
+
+def _accel_from_velocity(V, dt):
+    """速度的一阶差分。位置的二阶差分把噪声放大 sqrt(6)/dt^2（这里约 2200 倍），
+    速度的一阶差分只放大 sqrt(2)/dt（约 42 倍）—— 相差 50 倍。
+    所以两条路算出来的加速度谁更接近重力，就说明谁那一侧更干净。"""
+    n = len(V)
+    out = [None] * n
+    for i in range(n - 1):
+        out[i] = [(V[i + 1][k] - V[i][k]) / dt for k in range(3)]
+    return out
 
 
 def _accels(P, dt):
@@ -67,29 +87,44 @@ def _gaps(P, V, dt):
 
 
 def show_one(p: Path) -> None:
-    P, V, dt = _load(p)
+    P, V, dt, t = _load(p)
     acc, gap = _accels(P, dt), _gaps(P, V, dt)
     n = len(P)
     print(f"scene     : {p.stem}")
     print(f"dt        : {dt:.5f} s   frames: {n}")
     print("")
-    print("  f |     accel from position (m/s^2)    |  dev  | vel gap |  speed | flag")
-    print("----+------------------------------------+-------+---------+--------+-----")
+    lo, hi, mean, cv = _dt_uniformity(t)
+    print(f"dt spread : min {lo:.6f}  max {hi:.6f}  mean {mean:.6f}  "
+          f"spread {cv * 100:.2f}%"
+          + ("   <== NOT UNIFORM" if cv > 0.01 else ""))
+    print("")
+    print("  f | accel from POSITION (2nd diff) | dev  | accel from VELOCITY (1st) | dev  "
+          "| vel gap | flag")
+    print("----+-------------------------------+------+---------------------------+------"
+          "+---------+-----")
+    av = _accel_from_velocity(V, dt)
     for i in range(n):
         if acc[i] is None:
-            a_s, dev_s = f"{'-':>11}{'-':>12}{'-':>12}", f"{'-':>5}"
-            flag = ""
+            ap_s, dp_s, flag = f"{'-':>9}{'-':>11}{'-':>11}", f"{'-':>4}", ""
         else:
             a = acc[i]
-            a_s = f"{a[0]:11.2f}{a[1]:12.2f}{a[2]:12.2f}"
-            dev = math.dist(a, [0.0, 0.0, GRAVITY_Z])
-            dev_s = f"{dev:5.2f}"
-            flag = "  <== JUMP" if dev > JUMP_TOL else ""
+            ap_s = f"{a[0]:9.2f}{a[1]:11.2f}{a[2]:11.2f}"
+            d = math.dist(a, [0.0, 0.0, GRAVITY_Z])
+            dp_s = f"{d:4.1f}"
+            flag = "  <== JUMP" if d > JUMP_TOL else ""
+        if av[i] is None:
+            av_s, dv_s = f"{'-':>8}{'-':>9}{'-':>9}", f"{'-':>4}"
+        else:
+            a2 = av[i]
+            av_s = f"{a2[0]:8.2f}{a2[1]:9.2f}{a2[2]:9.2f}"
+            dv_s = f"{math.dist(a2, [0.0, 0.0, GRAVITY_Z]):4.1f}"
         g_s = f"{gap[i]:7.4f}" if gap[i] is not None else f"{'-':>7}"
-        print(f" {i:2d} | {a_s} | {dev_s} | {g_s} | "
-              f"{math.dist(V[i], [0, 0, 0]):6.3f} |{flag}")
+        print(f" {i:2d} | {ap_s} | {dp_s} | {av_s} | {dv_s} | {g_s} |{flag}")
     print("")
-    print(f"accel should be about (0, 0, {GRAVITY_Z}) on every frame; vel gap should be ~0.")
+    print(f"Both columns should read (0, 0, {GRAVITY_Z}) on every frame.")
+    print("The position column amplifies position noise by sqrt(6)/dt^2 (about 2200x here);")
+    print("the velocity column amplifies velocity noise by sqrt(2)/dt (about 42x). So if only")
+    print("the position column is wild, the positions are noisy and the velocities are fine.")
 
 
 def main() -> int:
@@ -131,7 +166,8 @@ def main() -> int:
           f"away from (0,0,{GRAVITY_Z})")
     print("")
 
-    n_ok = n_jump = n_skip = 0
+    n_ok = n_jump = n_skip = n_nonuniform = 0
+    vel_side: list[float] = []
     frame_hist: dict[int, int] = {}
     worst: list[tuple[float, str, int]] = []
     mean_off: list[tuple[float, str]] = []
@@ -141,10 +177,17 @@ def main() -> int:
             n_skip += 1
             continue
         try:
-            P, V, dt = _load(p)
+            P, V, dt, t = _load(p)
         except Exception:                                     # noqa: BLE001
             n_skip += 1
             continue
+        lo, hi, mean_dt, cv = _dt_uniformity(t)
+        if cv > 0.01:
+            n_nonuniform += 1
+        av = _accel_from_velocity(V, dt)
+        dv = [math.dist(a, [0.0, 0.0, GRAVITY_Z]) for a in av if a is not None]
+        if dv:
+            vel_side.append(sum(dv) / len(dv))
         acc = _accels(P, dt)
         devs = [(i, math.dist(a, [0.0, 0.0, GRAVITY_Z]))
                 for i, a in enumerate(acc) if a is not None]
@@ -199,10 +242,44 @@ def main() -> int:
               f"{root} --write")
 
     print("")
+    print("-" * 76)
+    print("Which side is noisy")
+    print("-" * 76)
+    if n_nonuniform:
+        print(f"[FAIL] {n_nonuniform}/{len(scenes)} scenes have non-uniform timestamps.")
+        print("       Everything below assumes a constant dt, so fix this first --")
+        print("       a varying dt makes every derivative wrong on its own.")
+        print("")
     mean_off.sort(reverse=True)
-    print(f"mean |accel - gravity| across scenes: "
-          f"best {mean_off[-1][0]:.3f}, worst {mean_off[0][0]:.3f} m/s^2 "
-          f"({mean_off[0][1]})")
+    pos_mean = sum(m for m, _ in mean_off) / len(mean_off) if mean_off else float("nan")
+    vel_mean = sum(vel_side) / len(vel_side) if vel_side else float("nan")
+    print(f"mean |accel - gravity|, derived from POSITION (2nd diff) : {pos_mean:8.3f} m/s^2")
+    print(f"mean |accel - gravity|, derived from VELOCITY (1st diff) : {vel_mean:8.3f} m/s^2")
+    print("")
+    if vel_mean == vel_mean and pos_mean == pos_mean:
+        if vel_mean < 1.0 <= pos_mean:
+            print("=> The velocities are consistent with gravity; the positions are not.")
+            print("   The positions carry noise, and differentiating them twice amplifies it")
+            print(f"   by about sqrt(6)/dt^2. Implied position noise: "
+                  f"{pos_mean * (dt * dt) / math.sqrt(6) * 1000:.1f} mm.")
+            print("")
+            print("   Do NOT run fix_velocity_from_position -- it rebuilds velocity from the")
+            print("   noisy side and would make things worse. If anything needs rebuilding it")
+            print("   is the positions, by integrating the velocities, or by fitting a")
+            print("   parabola per scene since the motion is known to be ballistic.")
+        elif pos_mean < 1.0 <= vel_mean:
+            print("=> The positions are clean and the velocities are not.")
+            print("   fix_velocity_from_position is the right repair.")
+        elif pos_mean < 1.0 and vel_mean < 1.0:
+            print("=> Both sides are consistent with gravity. The gap comes from somewhere")
+            print("   else -- check the timestamps first.")
+        else:
+            print("=> Neither side is consistent with gravity. Do not repair either from the")
+            print("   other; both are suspect. Check timestamps and the coordinate frame,")
+            print("   then go back to whoever exported the data.")
+    print("")
+    print(f"per-scene position-side deviation: best {mean_off[-1][0]:.3f}, "
+          f"worst {mean_off[0][0]:.3f} m/s^2 ({mean_off[0][1]})")
     print("=" * 76)
     return 0
 
