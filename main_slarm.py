@@ -265,6 +265,11 @@ def get_args_parser():
     # 内建 ball token
     parser.add_argument("--use_ball_token", action="store_true")
     parser.add_argument("--ball_token_freeze_backbone", action="store_true")
+    parser.add_argument("--stream25_ball_vel_scale", type=float, default=None,
+                        help="normalisation scale for the ball velocity loss, in m/s. "
+                             "Leave unset to derive it as pos_scale/dt, which weights the "
+                             "two ball terms by their actual effect on the landing point. "
+                             "Set 1.0 to reproduce runs from before 2026-08-31.")
     parser.add_argument("--use_ball_token_intrunk", action="store_true",
                         help="ball token as an aggregator special token (like sky/affine), "
                              "so it goes through every attention layer and can shape the "

@@ -40,10 +40,53 @@ STREAM25_LPIPS_CHUNK_IMAGES = 1
 
 def stream25_weights_from_args(args: Any) -> Dict[str, float]:
     """Read the ten frozen weights from the production argparse namespace."""
-    return {
+    out = {
         name: float(getattr(args, f"stream25_{name}_weight", default))
         for name, default in STREAM25_LOSS_WEIGHTS.items()
     }
+    # 可选覆盖：留空/0 表示按 timespan 自动推导（默认，物理一致）。
+    override = getattr(args, "stream25_ball_vel_scale", None)
+    if override:
+        out["ball_vel_scale"] = float(override)
+    return out
+
+
+# ball token 监督的归一化尺度。
+#
+# 位置用 0.1 m 是个量纲选择（球径 0.065 m 的量级）。速度的尺度**不能**随手取 1.0：
+# 它必须由"速度误差对落点的影响"决定，否则两项拿到的梯度和它们的实际重要性脱节。
+#
+#   frame24 = pos15 + v15 * dt + 0.5 * g * dt^2
+#
+# 位置误差 δp 对落点的贡献是 δp，速度误差 δv 的贡献是 δv * dt。要让 loss 里
+# 两项的权重与实际贡献成比例，必须有
+#
+#   vel_scale = pos_scale / dt
+#
+# 取 1.0 相当于把速度隐性降权了 dt 倍（timespan=0.8 时 dt=0.3，即降权 3.3 倍）。
+# 2026-08-31 的 in-trunk 实测正是这个后果：pos15 学到 0.041 m，vel15 停在
+# 0.251 m/s。归一化之后是 0.41 对 0.251 —— loss 认为速度已经比位置更准了，
+# 于是梯度都给了位置。而实际落点里速度贡献 0.251*0.3 = 0.075 m，
+# 位置只贡献 0.041 m：被优化器忽略的那一项才是主要误差来源。
+BALL_POS_SCALE_METERS = 0.1
+
+
+def ball_vel_scale_from_timespan(timespan: float) -> float:
+    """由 terminal 帧到最后一个 target 帧的物理时长推出速度的归一化尺度。
+
+    跟着 STREAM25_CONTEXT_FRAMES 走，改 context 帧数时自动重算，不用记得改常数。
+    """
+    from src.dataset.stream25 import (
+        STREAM25_ALL_TARGET_FRAMES,
+        STREAM25_CONTEXT_FRAMES,
+    )
+
+    last_target = STREAM25_ALL_TARGET_FRAMES[-1]
+    terminal = STREAM25_CONTEXT_FRAMES[-1]
+    dt = (last_target - terminal) / float(last_target) * float(timespan)
+    if not math.isfinite(dt) or dt <= 0:
+        return 1.0
+    return BALL_POS_SCALE_METERS / dt
 
 
 def stream25_ms3_scales_from_args(args: Any) -> Dict[str, float]:
@@ -414,8 +457,18 @@ def compute_stream25_loss(
         vel_gt = input_dict["ball_velocity_rig"][:, -1]
         pos_gt = pos_gt.reshape(pos_pred.shape[0], -1)[:, :3].to(pos_pred.dtype).to(pos_pred.device)
         vel_gt = vel_gt.reshape(vel_pred.shape[0], -1)[:, :3].to(vel_pred.dtype).to(vel_pred.device)
-        ball_pos_loss = F.smooth_l1_loss(pos_pred / 0.1, pos_gt / 0.1)   # 位置 scale 0.1m
-        ball_vel_loss = F.smooth_l1_loss(vel_pred / 1.0, vel_gt / 1.0)   # 速度 scale 1.0 m/s
+        # 速度尺度默认由 timespan 推出（见 ball_vel_scale_from_timespan 的推导）。
+        # config 里显式给了 stream25_ball_vel_scale 就用它 —— 需要复现 2026-08-31
+        # 之前那批实验时设成 1.0。
+        _ts = input_dict.get("timespan", 0.8) if input_dict is not None else 0.8
+        if isinstance(_ts, torch.Tensor):
+            _ts = float(_ts.detach().flatten()[0].item())
+        _vel_scale = float((weights or {}).get("ball_vel_scale") or
+                           ball_vel_scale_from_timespan(_ts))
+        ball_pos_loss = F.smooth_l1_loss(pos_pred / BALL_POS_SCALE_METERS,
+                                         pos_gt / BALL_POS_SCALE_METERS)
+        ball_vel_loss = F.smooth_l1_loss(vel_pred / _vel_scale, vel_gt / _vel_scale)
+        loss_dict["stream25_ball_vel_scale"] = pos_pred.new_tensor(_vel_scale)
         loss_dict["stream25_ball_pos_raw"] = ball_pos_loss.detach()
         loss_dict["stream25_ball_pos_loss"] = weights.get("ball_pos", 1.0) * ball_pos_loss
         loss_dict["stream25_ball_vel_raw"] = ball_vel_loss.detach()
