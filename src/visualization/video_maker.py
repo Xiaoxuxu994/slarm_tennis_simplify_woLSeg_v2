@@ -55,6 +55,10 @@ def make_video(
         assert dataset is not None
         if scene_id is None:
             scene_id = np.random.randint(0, len(dataset))
+        # 调用方传进来的 scene_id 可能是可视化序号而不是场景下标（见 engine_tools），
+        # 这里回绕一次 —— 否则越界只在 vis_every_n_iters 那一步暴露，
+        # 而那时前面几千步已经跑完、ckpt 还没存（visualize 在 checkpoint 之前）。
+        scene_id = int(scene_id) % len(dataset)
         data_dict = dataset.__getitem__(scene_id, np.random.randint(10, 100), return_all=True)
         data_dict = to_batch_tensor(data_dict)
     if not isinstance(data_dict['num_max_cams'], int):

@@ -93,8 +93,15 @@ def visualize(args, model, dset_train, step, train_vis_id, device,
         if vis_id is None or dataset is None:  # sometimes there is no validation set
             continue
 
+        # sample_id 只是"第几次可视化"的编号，rank 之间错开 80 以免撞车；
+        # 它不能直接当场景下标用 —— 数据集小于这个数就 IndexError，而且要等到
+        # vis_every_n_iters 那一步才炸，前面几千步的训练全部白跑。
+        # 之前的数据集都有 200+ 场景所以没暴露；50 个场景分三个 split 之后，
+        # validation 只剩几个，rank0 的 sample7 就已经越界。
         sample_id = global_rank * 80 + vis_id
-        out_pth = f"{args.video_dir}/step{step}-rank{global_rank}-sample{sample_id}-{split}.mp4"
+        scene_id = sample_id % len(dataset)
+        out_pth = (f"{args.video_dir}/step{step}-rank{global_rank}"
+                   f"-sample{sample_id}-scene{scene_id}-{split}.mp4")
 
         logger.info(f"saving video to {out_pth}")
         video = make_video(
@@ -102,7 +109,7 @@ def visualize(args, model, dset_train, step, train_vis_id, device,
             model,
             device,
             output_filename=out_pth,
-            scene_id=sample_id,
+            scene_id=scene_id,
             skip_plot_gt_depth_and_flow=False,
             feat_extractor=feat_extractor,
             # args=args,
