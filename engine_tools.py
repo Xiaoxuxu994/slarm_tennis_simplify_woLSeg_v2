@@ -55,6 +55,8 @@ def build_model(args):
             voxelize=args.voxelize,
             voxel_size=args.voxel_size,
             num_cams=args.num_max_cameras,
+            near=getattr(args, "depth_near", 0.2),
+            far=getattr(args, "depth_far", 400.0),
             sigmoid_rgb=args.sigmoid_rgb,
             use_pred_camera_pose=args.use_pred_camera_pose,
             use_pred_depth=args.use_pred_depth,

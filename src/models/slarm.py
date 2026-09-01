@@ -88,6 +88,25 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
         patch_size=14,
         decoder_type="dummy",
         # depth
+        #
+        # ★ depth_act_fn = near + sigmoid(x) * (far - near)，:495。
+        #   它不是显示用的量程，是**高斯位置**：:850 拿它乘射线方向得到 means。
+        #
+        #   far=400 远大于室内场景（接球数据实测 max 25.6 m），数据只占 sigmoid
+        #   输出的 6.3%。这不是纯粹的浪费 —— sigmoid 尾部 σ(x)≈e^x，于是
+        #       d(depth)/dx = (far-near)·σ(1-σ) ≈ depth - near
+        #   灵敏度只跟深度本身有关、与 far 无关，等价于一个对数深度参数化，
+        #   而那正是深度回归该用的参数化。近场（球所在的 1~5 m）几乎无损失。
+        #   代价只在远端：18 m 处对 logit 噪声的灵敏度是贴合量程的 2.4 倍，
+        #   25.6 m 处 6.3 倍。那里是背景墙面，不是球。
+        #
+        #   另一个代价是初始化：x=0 时预测 200 m，是场景中位深度的 29 倍，
+        #   从零训练要先把 logit 压到 -4 才进入正确量级。从 ckpt 微调不受影响。
+        #
+        # ★ 改这两个数会让所有已有 ckpt 失效：同一份权重解码出的深度完全不同
+        #   （logit -4 在 far=400 下是 6.84 m，在 far=30 下是 0.73 m，几何直接塌）。
+        #   真要迁移，近似补偿是给深度输出层 bias 加 ln((far_old-near)/(far_new-near))，
+        #   尾部成立、远端会偏 —— 那是独立的一次实验，别混进别的对比里。
         near=0.2,
         far=400,
         # model config

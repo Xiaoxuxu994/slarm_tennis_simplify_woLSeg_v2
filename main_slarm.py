@@ -321,6 +321,16 @@ def get_args_parser():
     parser.add_argument("--eval_batch_size", type=int, default=1)
     parser.add_argument("--input_size", default=(160, 240), type=int, nargs=2)
     parser.add_argument("--num_max_cameras", type=int, default=3)
+    # 深度激活的量程：depth = near + sigmoid(x) * (far - near)，决定高斯位置。
+    # ★ 默认值 0.2 / 400 是全部已有 ckpt 的口径，改了它们立刻失效
+    #   （同一份权重解码出的深度完全不同）。只在从零训练、或做专门的
+    #   量程消融时才动，别和其他对比混在一起。
+    parser.add_argument("--depth_near", type=float, default=0.2,
+                        help="lower bound of the depth activation, metres "
+                             "(changing this invalidates existing checkpoints)")
+    parser.add_argument("--depth_far", type=float, default=400.0,
+                        help="upper bound of the depth activation, metres "
+                             "(changing this invalidates existing checkpoints)")
     parser.add_argument(
         "--timespan",
         type=float,
