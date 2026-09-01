@@ -73,6 +73,7 @@ def main() -> int:
     import torch  # noqa: F401  (import here so --help works without torch)
     from engine_tools import build_model
     from src.utils import misc
+    from src.utils.misc import prepare_checkpoint_state_for_model
     from src.utils.stream25_losses import make_stream25_param_groups
     from tools.stream25_runtime import load_stream25_args
 
@@ -114,7 +115,21 @@ def main() -> int:
         return 2
 
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    state = ckpt.get("model", ckpt)
+    raw_state = ckpt.get("model", ckpt)
+
+    # ★ 必须走 load_model 用的同一条预处理，否则这个自检会给出假阴性。
+    #   裸的 load_state_dict 会在 aggregator.affine_token 上报 size mismatch
+    #   （三视图 ckpt -> 双视图模型是 [1,3,768] vs [1,2,768]），而真实训练路径
+    #   会按相机名 index_select 把它接上；分辨率相关的 plucker buffer 同理。
+    #   这里曾经直接调 load_state_dict，导致本来能训的配置被报成不兼容。
+    state, camera_report = prepare_checkpoint_state_for_model(
+        ckpt, model.state_dict(), args, checkpoint_path=ckpt_path
+    )
+    if camera_report.get("message"):
+        print(f"[Model-init] {camera_report['message']}")
+    else:
+        print("[Model-init] no camera remapping needed (same camera list)")
+
     msg = model.load_state_dict(state, strict=False)
     missing, unexpected = list(msg.missing_keys), list(msg.unexpected_keys)
     loaded = len(state) - len(unexpected)

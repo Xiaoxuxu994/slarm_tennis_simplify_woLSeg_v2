@@ -381,6 +381,84 @@ def _camera_names_from_arguments(arguments, *, role: str) -> list[str]:
     return _validated_camera_names(first, role=role)
 
 
+def prepare_checkpoint_state_for_model(
+    checkpoint: Mapping,
+    model_state: Mapping[str, torch.Tensor],
+    args,
+    *,
+    checkpoint_path: str | os.PathLike | None = None,
+) -> tuple[OrderedDict, dict]:
+    """Adapt a checkpoint state dict to the current model before load_state_dict.
+
+    Two things here are not optional and cannot be reproduced by calling
+    load_state_dict directly:
+
+      * resolution-dependent plucker buffers are taken from the target model,
+        so a 320x240 checkpoint can initialize a 480x640 run;
+      * aggregator.affine_token is reindexed BY CAMERA NAME, so a tri-view
+        checkpoint initializes a two-view model (front_left/front_right kept,
+        lower_front dropped) and vice versa.
+
+    Any caller that skips this and calls load_state_dict on the raw checkpoint
+    gets a size mismatch on aggregator.affine_token and concludes the
+    checkpoint is incompatible, when it is not. That is why this lives in one
+    function instead of being inlined in load_model.
+
+    Returns the prepared state dict and a report describing what was done.
+    """
+    checkpoint_state = checkpoint.get("model", checkpoint)
+    report: dict = {"camera_action": "none"}
+
+    has_camera_parameter = bool(
+        set(_CAMERA_SPECIFIC_PARAMETER_AXES)
+        .intersection(checkpoint_state)
+        .intersection(model_state)
+    )
+    if not has_camera_parameter:
+        return _replace_resolution_dependent_buffers(checkpoint_state, model_state), report
+
+    source_camera_names = _checkpoint_camera_names(checkpoint)
+    target_camera_names = _camera_names_from_arguments(args, role="current")
+    report["source_camera_names"] = source_camera_names
+    report["target_camera_names"] = target_camera_names
+
+    checkpoint_state = _replace_resolution_dependent_buffers(
+        checkpoint_state,
+        model_state,
+    )
+    if (
+        tuple(source_camera_names) == _STEREO_CAMERA_ORDER
+        and tuple(target_camera_names) == _TRIVIEW_CAMERA_ORDER
+    ):
+        checkpoint_state, camera_report = _expand_named_camera_state_dict(
+            checkpoint_state,
+            model_state,
+            source_camera_names=source_camera_names,
+            target_camera_names=target_camera_names,
+            checkpoint_sha256=(
+                _sha256_file(checkpoint_path) if checkpoint_path else ""
+            ),
+        )
+        report["camera_action"] = "expand"
+        report["expansion"] = camera_report
+        report["message"] = f"Named camera expansion: {camera_report}"
+    else:
+        checkpoint_state = _remap_camera_specific_state_dict(
+            checkpoint_state,
+            model_state,
+            source_camera_names=source_camera_names,
+            target_camera_names=target_camera_names,
+        )
+        indices = select_camera_indices(source_camera_names, target_camera_names)
+        report["camera_action"] = "remap"
+        report["indices"] = indices
+        report["message"] = (
+            f"Camera mapping: source={source_camera_names}, "
+            f"target={target_camera_names}, indices={indices}"
+        )
+    return checkpoint_state, report
+
+
 def camera_names_from_arguments(arguments, *, role: str = "current") -> list[str]:
     """Named cameras implied by (dataset, num_max_cameras) in a config/args object.
 
@@ -516,68 +594,20 @@ def load_model(args, model_without_ddp, optimizer=None, loss_scaler=None):
         )
         if getattr(args, "require_stream25_checkpoint_contract", False):
             validate_stream25_checkpoint_contract(checkpoint, args, role="evaluation")
-        checkpoint_state = checkpoint.get("model", checkpoint)
-        model_state = model_without_ddp.state_dict()
-        camera_parameter_names = set(_CAMERA_SPECIFIC_PARAMETER_AXES)
-        has_camera_parameter = bool(
-            camera_parameter_names.intersection(checkpoint_state).intersection(
-                model_state
-            )
+        checkpoint_state, camera_report = prepare_checkpoint_state_for_model(
+            checkpoint,
+            model_without_ddp.state_dict(),
+            args,
+            checkpoint_path=args.load_from,
         )
-        if has_camera_parameter:
-            source_camera_names = _checkpoint_camera_names(checkpoint)
-            target_camera_names = _camera_names_from_arguments(
-                args,
-                role="current",
-            )
-            if (
-                tuple(source_camera_names) == _STEREO_CAMERA_ORDER
-                and tuple(target_camera_names) == _TRIVIEW_CAMERA_ORDER
-            ):
-                checkpoint_state = _replace_resolution_dependent_buffers(
-                    checkpoint_state,
-                    model_state,
-                )
-                checkpoint_state, camera_report = _expand_named_camera_state_dict(
-                    checkpoint_state,
-                    model_state,
-                    source_camera_names=source_camera_names,
-                    target_camera_names=target_camera_names,
-                    checkpoint_sha256=_sha256_file(args.load_from),
-                )
-                if isinstance(args, dict):
-                    args["camera_initialization_report"] = camera_report
-                else:
-                    setattr(args, "camera_initialization_report", camera_report)
-                logger.info(
-                    "[Model-init] Named camera expansion: %s",
-                    camera_report,
-                )
+        if camera_report.get("camera_action") == "expand":
+            expansion = camera_report["expansion"]
+            if isinstance(args, dict):
+                args["camera_initialization_report"] = expansion
             else:
-                checkpoint_state = _replace_resolution_dependent_buffers(
-                    checkpoint_state,
-                    model_state,
-                )
-                checkpoint_state = _remap_camera_specific_state_dict(
-                    checkpoint_state,
-                    model_state,
-                    source_camera_names=source_camera_names,
-                    target_camera_names=target_camera_names,
-                )
-                logger.info(
-                    "[Model-init] Camera mapping: source=%s, target=%s, indices=%s",
-                    source_camera_names,
-                    target_camera_names,
-                    select_camera_indices(
-                        source_camera_names,
-                        target_camera_names,
-                    ),
-                )
-        else:
-            checkpoint_state = _replace_resolution_dependent_buffers(
-                checkpoint_state,
-                model_state,
-            )
+                setattr(args, "camera_initialization_report", expansion)
+        if camera_report.get("message"):
+            logger.info("[Model-init] %s", camera_report["message"])
 
         msg = model_without_ddp.load_state_dict(checkpoint_state, strict=False)
         allowed_missing_prefixes = ("task_semantic_pred.",)
