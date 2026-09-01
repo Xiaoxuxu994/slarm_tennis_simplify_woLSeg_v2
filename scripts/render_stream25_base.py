@@ -1,5 +1,5 @@
 """Streaming reconstruction inference with a configurable render horizon."""
-import os, sys, torch, numpy as np, imageio
+import math, os, sys, torch, numpy as np, imageio
 os.environ.setdefault("FEAT_DIST", "1")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root on sys.path (脚本位于 scripts/)
 
@@ -83,19 +83,42 @@ def make_label(text, w=320, h=20):
     return img
 
 
-def depth_to_color(depth, d_min=0.5, d_max=5.0):
-    """Linear turbo ramp over [d_min, d_max] metres.
+def _turbo():
+    import matplotlib
+    try:                                   # matplotlib >= 3.7
+        return matplotlib.colormaps["turbo"]
+    except (AttributeError, KeyError):     # older releases
+        import matplotlib.cm as cm
+        return cm.get_cmap("turbo")
+
+
+def depth_to_color(depth, d_min=0.5, d_max=5.0, curve="log"):
+    """Turbo ramp over [d_min, d_max] metres.
 
     A fixed range is only readable when it matches the scene. Anything outside
     saturates: everything past d_max is the same red, everything before d_min
     the same blue, and the image stops carrying information. Use
     depth_display_range() to pick the range from the data instead of guessing.
+
+    curve="log" spreads the near field, which is where the ball is. These
+    scenes span roughly 0.2-18 m, an 80:1 ratio; under a linear ramp the whole
+    1-5 m band lands in the bottom fifth of the colour range and reads as one
+    shade of blue. Depth accuracy is relative anyway (10 cm at 2 m and 10 cm
+    at 18 m are not the same error), so a log scale is also the honest one.
+    curve="linear" keeps absolute spacing when that is what you want to judge.
     """
-    import matplotlib.cm as cm
-    span = max(float(d_max) - float(d_min), 1e-6)
-    v = np.clip((depth - d_min) / span, 0, 1)
-    v = np.nan_to_num(v, nan=0.0, posinf=1.0, neginf=0.0)
-    return (cm.get_cmap("turbo")(v)[:, :, :3] * 255).astype(np.uint8)
+    d_min, d_max = float(d_min), float(d_max)
+    if curve == "log":
+        eps = 1e-6
+        lo = math.log(max(d_min, 1e-3) + eps)
+        hi = math.log(max(d_max, max(d_min, 1e-3) + 1e-3) + eps)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            scaled = (np.log(np.maximum(depth, 1e-3) + eps) - lo) / max(hi - lo, 1e-6)
+    else:
+        scaled = (depth - d_min) / max(d_max - d_min, 1e-6)
+    v = np.nan_to_num(scaled, nan=0.0, posinf=1.0, neginf=0.0)
+    v = np.clip(v, 0, 1)
+    return (_turbo()(v)[:, :, :3] * 255).astype(np.uint8)
 
 
 def depth_stats(tensor, max_samples=2_000_000):
@@ -129,7 +152,8 @@ def depth_display_range(gt_stats, pred_stats, pad=0.05):
     if hi - lo < 1e-3:
         lo, hi = lo - 0.5, hi + 0.5
     margin = (hi - lo) * pad
-    return lo - margin, hi + margin
+    # 深度没有负值，下界减到 0 以下只会白白吃掉一段色带
+    return max(lo - margin, 0.0), hi + margin
 
 
 def semantic_to_color(seg):
@@ -160,6 +184,10 @@ def main():
     p2.add_argument("--depth-max", "--depth_max", dest="depth_max", type=float, default=None,
                     help="depth colour ramp upper bound in metres; "
                          "default: 98th percentile of this scene's GT+pred depth")
+    p2.add_argument("--depth-curve", "--depth_curve", dest="depth_curve",
+                    choices=("log", "linear"), default="log",
+                    help="log (default) spreads the near field where the ball is; "
+                         "linear keeps absolute spacing")
     extra, remaining = p2.parse_known_args()
 
     from main_slarm import get_args_parser
@@ -260,7 +288,8 @@ def main():
                 print(f"  depth {name}: p2={st['p2']:.2f} p50={st['p50']:.2f} "
                       f"p98={st['p98']:.2f}  min={st['min']:.2f} max={st['max']:.2f} "
                       f"n={st['n']}", flush=True)
-        print(f"  depth ramp : {d_lo:.2f} - {d_hi:.2f} m  [{source}]", flush=True)
+        print(f"  depth ramp : {d_lo:.2f} - {d_hi:.2f} m  "
+              f"[{extra.depth_curve}, {source}]", flush=True)
         if gt_stats and pred_stats:
             ratio = pred_stats["p50"] / max(gt_stats["p50"], 1e-6)
             if ratio > 1.5 or ratio < 0.67:
@@ -289,7 +318,7 @@ def main():
                     gt_img = np.clip(gt_img, 0, 1)
                     gt_img = (gt_img * 255).astype(np.uint8)
                     gt_d = gt_depth[0, frame_idx, cam_idx].cpu().float().numpy()
-                    gt_dc = depth_to_color(gt_d, d_lo, d_hi)
+                    gt_dc = depth_to_color(gt_d, d_lo, d_hi, extra.depth_curve)
                     gt_sc = semantic_to_color(
                         gt_semantic[0, frame_idx, cam_idx].cpu().numpy()
                     )
@@ -303,7 +332,7 @@ def main():
                 pred_img = (pred_img * 255).astype(np.uint8)
 
                 pd_d = rendered_depth[0, frame_idx, cam_idx].cpu().float().numpy()
-                pd_dc = depth_to_color(pd_d, d_lo, d_hi)
+                pd_dc = depth_to_color(pd_d, d_lo, d_hi, extra.depth_curve)
 
                 if rendered_semantic is not None:
                     pd_s = rendered_semantic[0, frame_idx, cam_idx].cpu().numpy()
@@ -328,10 +357,10 @@ def main():
                 else "GT unavailable beyond recorded clip"
             )
             col_labels_l = make_label(
-                f"{gt_column_label}  [depth {d_lo:.1f}-{d_hi:.1f}m]",
+                f"{gt_column_label}  [depth {d_lo:.1f}-{d_hi:.1f}m {extra.depth_curve}]",
                 w=col_label_w, h=18)
             col_labels_r = make_label(
-                f"Pred: RGB | Depth ({d_lo:.1f}-{d_hi:.1f}m) | Semantic",
+                f"Pred: RGB | Depth ({d_lo:.1f}-{d_hi:.1f}m {extra.depth_curve}) | Semantic",
                 w=col_label_w, h=18)
             col_labels = np.concatenate([col_labels_l, col_labels_r], axis=1)
 
