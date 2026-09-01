@@ -1,13 +1,29 @@
-# v3_0829 数据 · 6.5cm 小球 · 双视图（front_left + front_right）迁移微调
+# 6.5cm 仿真数据 · 三视图对照组（exp0902_001 的 control）
 #
 # ═══════════════════════════════════════════════════════════════
-# 与 exp0901_001 逐键相同，只差 num_max_cameras: 3 -> 2。
-# 两组之差 = 视图数之差，没有别的解释 —— 这是这组存在的全部理由。
+# 与 exp0902_001（双视图）逐键相同，只差 num_max_cameras: 2 -> 3。
+# 这组本身不产生新结论，它的唯一作用是给双视图那组一个可比的对照 ——
+# 同起点、同 seed、同步数、同 LR 曲线，只有视图数不同。
 #
-# 起点同为 exp0827_003 退火终点 ckpt_005999（三视图训练的 backbone）。
+# ★ 不能省。拿 exp0902_001 去比 ckpt_005999 本身是错的：本组在退火终点
+#   之上又训了 8k 步，多出来的步数本身就会改变指标，那个差里混了两个变量。
+#
+# 起点：exp0827_003 退火终点 ckpt_005999，三视图在这批数据上训出来的
+# 收敛点（pos15 0.0235 / p95 0.0428 / frame24 0.0246）。
+#
+# ★ 选 6.5cm 而不是 v3_0829 做这个消融，是因为它同域、场景多、数据干净：
+#   2000 场景在双视图下 0 个全盲（v3_0829 有全盲问题），
+#   scene_list 不用做任何剔除，两组看的是同一批场景。
+#   视图数是唯一变量，这是这个消融能成立的前提。
+#
 # ═══════════════════════════════════════════════════════════════
 #
-# ── 从三视图 ckpt 起步为什么可行 ────────────────────────────────
+# ── 起点与 ckpt ───────────────────────────────────────────────
+#
+# 视图数与 ckpt 一致（都是三视图），相机重映射是恒等，
+# [Model-init] 那行会打 indices=[0, 1, 2]。下面这段留着供对照阅读。
+#
+# ── （双视图那组是怎么从同一个 ckpt 起步的）───────────────────
 #
 # 全网络只有一个参数随相机数变形状：
 #     aggregator.affine_token   (1, num_cams, 768)      aggregator.py:189
@@ -39,43 +55,47 @@
 #     n_views = 2   ->  RMS 11.11 mm      约 2 倍
 # 那是标注的数字，但反映的是同一个几何事实，模型侧的退化不会比它更好。
 #
-# 判据：跟 exp0901_001 同一次 verify 的 pos15 / frame24 比。
+# 判据：本组是被比的一方，看 exp0902_001 相对它退化多少。
 #     退化 < 1.5x  -> 双视图可用，省一路相机是划算的
 #     退化 ~ 2x    -> 与几何预期一致，是基线问题不是模型问题，
 #                     再加视图数以外的手段（ball token / 时序约束）也补不回来
 #     退化 > 3x    -> 不是几何能解释的，先查数据（见下）
 #
-# ── 数据侧必须先做的一件事 ────────────────────────────────────
+# ── 数据侧：已核对，无需剔场景 ────────────────────────────────
 #
-# 球的可见性会变差：三视图下抽查 5 个场景已有 2 个出现"某个 context 帧全盲"，
-# 其中一个是 frame 15（外推锚点）。只剩两个视角只会更糟，那类场景在
-# frame24 指标里是纯噪声，会把两组的对比污染掉。
+# 2000 场景全量扫过，双视图和三视图都是 0 个全盲：
 #
-#     python tools/check_dataset_contract.py --data-root data/slarm_data \
-#         --num-cams 2 --visibility-summary --limit 0
+#     python tools/check_dataset_contract.py --data-root data/SLARM_data_6.5 \
+#         --visibility-summary --limit 0 --num-cams 2
+#     python tools/check_dataset_contract.py --data-root data/SLARM_data_6.5 \
+#         --visibility-summary --limit 0 --num-cams 3
 #
-# ★ 如果双视图下要剔除的场景比三视图多，两组就不能用同一份 scene_list 比。
-#   正确做法是取两者的交集当共同 scene_list，否则测的是"数据集难度差"
-#   而不是"视图数差"。
+#     frame 15 | front_left 0  front_right 0 | all-blind 0     <- terminal
+#     scenes with at least one blind context cell : 0/2000 (0.0%)
+#
+# 球在 front_left/front_right 里全程可见，砍掉 lower_front 不损失任何锚点。
+# 两组直接用同一份 scene_list，不需要 drop list。
+#
+# ★ 换数据集时这一步要重跑。v3_0829 就有全盲场景，那批必须先取交集。
 #
 # ── 卡数与 batch ──────────────────────────────────────────────
 #
 # token 数是 t·v·P，v 从 3 降到 2，显存省约 1/3。
 # ★ 但 batch_size 保持 1、卡数保持 2 —— batch_size 是 per-GPU 且代码里没有
-#   梯度累积，一改全局 batch 就和 exp0901_001 不可比了。省下的显存宁可空着。
+#   梯度累积，一改全局 batch 就和 exp0902_001 不可比了。
 #   真要用，调 stream25_render_target_chunk_size，那个不影响优化口径。
 model: slarm
-dataset: [ball_catch_triview_v3_0829]
-data_root: data/slarm_data
+dataset: [ball_catch_6.5cm_triview]
+data_root: data/SLARM_data_6.5
 
 input_size: [320, 240]
 patch_size: 8
 embed_dim: 768
 depth: 12
 patch_embed: conv
-num_max_cameras: 2                   # ★ 本 config 唯一的实验变量
-                                     #   同时驱动两侧：datasets.py:266 查 camera_list[2]
-                                     #   = [front_left, front_right]；engine_tools.py:57
+num_max_cameras: 3                   # ★ 本 config 唯一的实验变量
+                                     #   同时驱动两侧：datasets.py:266 查 camera_list[3]
+                                     #   = [front_left, front_right, lower_front]；engine_tools.py:57
                                      #   把它传成 num_cams，决定 affine_token 的形状
 num_context_timesteps: 6
 num_target_timesteps: 7
@@ -141,17 +161,17 @@ lr_sched: cosine                     # ★ 不许改。constant 跑到底会让�
 min_lr: 1.0e-7
 warmup_iters: 1000
 batch_size: 1
-seed: 20260901                       # ★ 与 exp0901_001 同 seed，两组可比
+seed: 20260902                       # ★ 与 exp0902_001 同 seed，两组可比
 
 load_from: work_dirs/slarm/exp0827_003_slarm_stream25_6.5cm_triview_window6_nolseg_anneal/checkpoints/ckpt_005999.pth
 
-train_annotation: scene_list/ball_catch_triview_v3_0829_train.txt
-eval_annotation: scene_list/ball_catch_triview_v3_0829_validation.txt
-num_iterations: 20000
-ckpt_every_n_iters: 2000
-vis_every_n_iters: 4000
+train_annotation: scene_list/ball_catch_6.5cm_triview_train.txt
+eval_annotation: scene_list/ball_catch_6.5cm_triview_validation.txt
+num_iterations: 8000
+ckpt_every_n_iters: 1000
+vis_every_n_iters: 2000
 num_vis_samples: 1
 eval_every_n_iters: 50000
 keep_n_ckpts: 10
 project: slarm
-exp_name: exp0902_001_slarm_stream25_v3_0829_stereo_window6_nolseg_finetune
+exp_name: exp0902_002_slarm_stream25_6.5cm_triview_window6_nolseg_control
