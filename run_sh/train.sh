@@ -50,7 +50,13 @@ RESUME=0
 # misc.py 按相机名 index_select 取 [front_left, front_right] 两行。
 # ★ 是 load_from 不是 resume，别用 --auto_resume 去接退火那个 run。
 # 数据已核对：2000 场景双视图 0 全盲，两组同一份 scene_list，不需要剔场景。
+#
+# ★ 先只跑双视图这一组也可以，但结论是单向的：
+#   拿它比已发布的三视图基线（ckpt_005999: pos15 0.0235 / f24 0.0246），
+#   差里混着"多训 20k 步"，而那 20k 步只会帮双视图、不会害它。
+#   所以「明显更差」是可信结论，「打平或更好」不是 —— 后者要补 exp0902_002。
 # CONFIG="configs/exp0902_001_slarm_stream25_6.5cm_stereo_window6_nolseg.yml"
+# 三视图对照，只在上面那组打平/更好时才需要跑
 # CONFIG="configs/exp0902_002_slarm_stream25_6.5cm_triview_window6_nolseg_control.yml"
 #
 # ── in-trunk ball token（8/29）──
