@@ -20,6 +20,15 @@ DEFAULT_TRANSITIONS = (15, 6, 4, 11, 13, 6)
 logger = logging.getLogger("PerceptualModel")
 turbo_cmap = cm.get_cmap("turbo")
 
+# ★ lo=4.0 / hi=120 是给驾驶数据集（waymo / nuscenes / b2d / argoverse2）定的量程。
+#   保留原值，那几套数据仍然按这个口径出图。
+#
+#   但它对室内小场景是错的：接球数据实测 p2/p50/p98 = 0.23 / 6.84 / 18.01 m，
+#   而 -log 曲线在 lo=4 处就已经饱和 —— 4 m 以内（正好是球所在的区间）
+#   全部压成同一个红色，看不出任何深度结构；远景 6.8~25.6 m 又只用掉
+#   orange->green 不到半条色带。分辨率全花在了不关心的地方。
+#
+#   需要按数据定量程时用 make_depth_visualizer()，不要改这里。
 depth_visualizer = lambda frame, opacity: visualize_depth(
     frame,
     opacity,
@@ -27,6 +36,61 @@ depth_visualizer = lambda frame, opacity: visualize_depth(
     hi=120,
     depth_curve_fn=lambda x: -np.log(x + 1e-6),
 )
+
+
+def depth_range_from_samples(depth, lo_pct=2.0, hi_pct=98.0, pad=0.05,
+                             max_samples=2_000_000):
+    """Display range from the finite positive samples. None if there are none.
+
+    Percentiles rather than min/max: a handful of far background pixels or one
+    near-zero sample would otherwise flatten everything else into one colour.
+    """
+    values = np.asarray(depth, dtype=np.float64).reshape(-1)
+    values = values[np.isfinite(values) & (values > 0)]
+    if values.size == 0:
+        return None
+    if values.size > max_samples:
+        values = values[:: values.size // max_samples + 1]
+    lo, hi = np.percentile(values, [lo_pct, hi_pct])
+    if hi - lo < 1e-3:
+        lo, hi = lo - 0.5, hi + 0.5
+    margin = (hi - lo) * pad
+    return max(float(lo) - margin, 0.0), float(hi) + margin
+
+
+def make_depth_visualizer(depth_samples=None, lo=None, hi=None):
+    """Return a depth_visualizer bound to one fixed range.
+
+    One range for the whole video and shared by GT and prediction. Letting
+    visualize_depth auto-range per call would re-derive it from each frame --
+    the video flickers, and GT (weighted by a validity mask) and prediction
+    (weighted by rendered alpha) would land on different scales, so the two
+    rows could no longer be compared.
+
+    Falls back to the driving-dataset default when no samples are given, so
+    callers that do not opt in keep their current output.
+    """
+    if lo is None or hi is None:
+        resolved = (
+            depth_range_from_samples(depth_samples)
+            if depth_samples is not None
+            else None
+        )
+        if resolved is None:
+            return depth_visualizer
+        lo, hi = resolved
+
+    def _vis(frame, opacity):
+        # log 曲线：这些场景跨度约 80:1，线性映射会把 1~5 m 的球区挤进色带底部
+        # 五分之一。深度误差本来也是相对量（2 m 处差 10 cm 和 18 m 处差 10 cm
+        # 不是一回事），log 才是诚实的刻度。
+        return visualize_depth(
+            frame, opacity, lo=lo, hi=hi,
+            depth_curve_fn=lambda x: np.log(np.maximum(x, 1e-3) + 1e-6),
+        )
+
+    _vis.range = (lo, hi)
+    return _vis
 
 flow_visualizer = (
     lambda frame: scene_flow_to_rgb(

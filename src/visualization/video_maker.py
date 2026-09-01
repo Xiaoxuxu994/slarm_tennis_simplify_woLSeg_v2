@@ -18,7 +18,7 @@ from src.dataset.data_utils import (
 
 from .annotation import add_label
 from .layout import add_border, hcat, prep_image, vcat
-from .visualization_tools import depth_visualizer, scene_flow_to_rgb, feat_visualizer, get_global_pac_linear
+from .visualization_tools import depth_visualizer, make_depth_visualizer, scene_flow_to_rgb, feat_visualizer, get_global_pac_linear
 
 logger = logging.getLogger("PerceptualModel")
 
@@ -106,6 +106,20 @@ def make_video(
         # x = (x * std + mean).clamp(0.0, 1.0)  # NOTE: rgb normalization
         return rearrange(x, "t v h w c -> t v c h w")
 
+    # 深度色标量程按本段 GT 定一次，整段视频、GT 与 Pred 共用。
+    # 模块级 depth_visualizer 写死的是 lo=4/hi=120（驾驶数据集口径）——
+    # 接球场景 4 m 以内会全部饱和成红色，而球正好在那个区间。
+    # 拿不到 GT 深度时退回原行为，不改变其他数据集的输出。
+    _gt_depth_samples = target_dict.get("target_depth")
+    if _gt_depth_samples is None:
+        _gt_depth_samples = input_dict.get("context_depth")
+    depth_vis = make_depth_visualizer(
+        _gt_depth_samples.detach().cpu().numpy()
+        if _gt_depth_samples is not None
+        else None
+    )
+    _depth_range = getattr(depth_vis, "range", None)
+
     # t, v, c, h, w
     context_images = input_dict["context_image"][0]
     context_images = denormalize(context_images)
@@ -171,7 +185,7 @@ def make_video(
         # alpha_image = rearrange(pred_dict["rendered_context_alpha"][0], 't v h w -> (t v) h w').detach().cpu().numpy()
         depth_image = rearrange(pred_dict["rendered_context_depth"][0], 't v h w -> (t v) h w').detach().cpu().numpy()
         alpha_image = None
-        depth_image = depth_visualizer(depth_image, alpha_image)
+        depth_image = depth_vis(depth_image, alpha_image)
         depth_image = torch.from_numpy(depth_image)
         rendered_context_depths = rearrange(depth_image, "(t v) ... c -> t v c ...", v=context_v)
         rendered_context_depths_frames = []
@@ -236,7 +250,7 @@ def make_video(
         if f"context_{t}_rendered_image" in render_results.keys():
             pred_context_image_list.append(denormalize(render_results[f'context_{t}_rendered_image'][0], already_channel_last=True))
         if f"context_{t}_rendered_depth" in render_results.keys():
-            pred_context_depth_list.append(rearrange(torch.from_numpy(depth_visualizer(
+            pred_context_depth_list.append(rearrange(torch.from_numpy(depth_vis(
                                             rearrange(render_results[f'context_{t}_rendered_depth'][0], "t v ... -> (t v) ...")
                                             .detach().cpu().numpy(), None)), "(t v) h w c -> t v c h w", t=target_t))
         if f"context_{t}_rendered_alpha" in render_results.keys():
@@ -359,7 +373,7 @@ def make_video(
             alpha_image = None
             depth_image = depth_image.detach().cpu().numpy()
 
-            depth_image = depth_visualizer(depth_image, alpha_image)
+            depth_image = depth_vis(depth_image, alpha_image)
             depth_image = torch.from_numpy(depth_image)
             depth_image = rearrange(depth_image, "v h w c -> v c h w")
             pred_depth = add_label(
@@ -389,7 +403,7 @@ def make_video(
                 ).squeeze(-3)
             depth_image = depth_image.detach().cpu().numpy()
             alpha_image = alpha_image.detach().cpu().numpy()
-            depth_image = depth_visualizer(depth_image, alpha_image)
+            depth_image = depth_vis(depth_image, alpha_image)
             depth_image = torch.from_numpy(depth_image)
             depth_image = rearrange(depth_image, "v h w c -> v c h w")
             pred_depth = add_label(
@@ -403,7 +417,7 @@ def make_video(
         if "target_depth" in target_dict.keys():
             gt_depth = target_dict["target_depth"][0][t]
             gt_depth = gt_depth.detach().cpu().numpy()
-            gt_depth = depth_visualizer(gt_depth, gt_depth > 0)
+            gt_depth = depth_vis(gt_depth, gt_depth > 0)
             gt_depth = torch.from_numpy(gt_depth)
             gt_depth = rearrange(gt_depth, "v h w c -> v c h w")
             gt_depth = add_label(
@@ -550,7 +564,9 @@ def make_video(
         frame = add_border(
             add_label(
                 frame,
-                f"Scene{input_dict['scene_id']:03d}-{input_dict['scene_name'][:15]}",
+                f"Scene{input_dict['scene_id']:03d}-{input_dict['scene_name'][:15]}"
+                + (f"  [depth {_depth_range[0]:.1f}-{_depth_range[1]:.1f}m log]"
+                   if _depth_range else ""),
                 font_size=24,
                 align="center",
             )
@@ -620,6 +636,14 @@ def make_clean_video(
 
     B, context_t, context_v, _, H, W = input_dict["context_image"].shape
     _, target_t, target_v, _, H_tgt, W_tgt = target_dict["target_image"].shape
+
+    # 同 make_video：按本段 GT 深度定一次量程，GT/Pred/整段视频共用。
+    _gt_depth_samples = target_dict.get("target_depth")
+    depth_vis = make_depth_visualizer(
+        _gt_depth_samples.detach().cpu().numpy()
+        if _gt_depth_samples is not None
+        else None
+    )
 
     device = input_dict["context_image"].device
     mean = torch.tensor([[MEAN]], device=device)
@@ -751,7 +775,7 @@ def make_clean_video(
             alpha_image = None
             depth_image = depth_image.detach().cpu().numpy()
 
-            depth_image = depth_visualizer(depth_image, alpha_image)
+            depth_image = depth_vis(depth_image, alpha_image)
             depth_image = torch.from_numpy(depth_image)
             depth_image = rearrange(depth_image, "v h w c -> v c h w")
             pred_depth = add_label(
@@ -781,7 +805,7 @@ def make_clean_video(
                 ).squeeze(-3)
             depth_image = depth_image.detach().cpu().numpy()
             alpha_image = alpha_image.detach().cpu().numpy()
-            depth_image = depth_visualizer(depth_image, alpha_image)
+            depth_image = depth_vis(depth_image, alpha_image)
             depth_image = torch.from_numpy(depth_image)
             depth_image = rearrange(depth_image, "v h w c -> v c h w")
             pred_depth = add_label(
@@ -795,7 +819,7 @@ def make_clean_video(
         if "target_depth" in target_dict.keys() and not skip_depth:
             gt_depth = target_dict["target_depth"][0][t]
             gt_depth = gt_depth.detach().cpu().numpy()
-            gt_depth = depth_visualizer(gt_depth, gt_depth > 0)
+            gt_depth = depth_vis(gt_depth, gt_depth > 0)
             gt_depth = torch.from_numpy(gt_depth)
             gt_depth = rearrange(gt_depth, "v h w c -> v c h w")
             gt_depth = add_label(
