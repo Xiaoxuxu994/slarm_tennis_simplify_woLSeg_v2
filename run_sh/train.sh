@@ -43,6 +43,14 @@ RESUME=0
 # 已把 render chunk 降到 2、步数减到 12k；显存还不够就把 chunk 降到 1。
 # CONFIG="configs/exp0901_002_slarm_stream25_v3_0829_native_triview_window6_nolseg_finetune.yml"
 #
+# ── 双视图对照（9/02）──
+# 与 exp0901_001 逐键相同，只差 num_max_cameras 3 -> 2，两组之差 = 视图数之差。
+# 三视图 ckpt 能直接 load_from：全网络只有 aggregator.affine_token 随相机数变形状，
+# misc.py 会按相机名 index_select 取 [front_left, front_right] 两行。
+# ★ 是 load_from 不是 resume，别对它用 --auto_resume 去接三视图的 run。
+# ★ 开跑前先跑 --num-cams 2 的可见性统计并取 scene_list 交集，否则比的是数据集难度。
+# CONFIG="configs/exp0902_001_slarm_stream25_v3_0829_stereo_window6_nolseg_finetune.yml"
+#
 # ── in-trunk ball token（8/29）──
 # ball token 改成 aggregator 的 special token（和 sky token 同等地位），走完全部
 # attention 层。回答 A/B 回答不了的问题：球的位置信息是 backbone 学不到，

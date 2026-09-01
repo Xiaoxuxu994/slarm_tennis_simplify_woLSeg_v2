@@ -474,12 +474,28 @@ def _check_visibility(js: dict, cams, n: int, data_root: Path,
 
 
 # ---------------------------------------------------------------- 可见性总览
-def visibility_summary(scene_files, root: Path) -> int:
+CAMERA_CONTRACT = {
+    2: ["front_left", "front_right"],
+    3: ["front_left", "front_right", "lower_front"],
+}
+
+
+def visibility_summary(scene_files, root: Path, num_cams: int | None = None,
+                       drop_list_path: Path | None = None) -> int:
     """扫全部场景，统计 context 帧的球可见性分布。
 
     抽查几个场景只能告诉你"有这个问题"，告诉不了你"这个问题有多大"。
     决定一份数据能不能用，看的是分布：偶发的几帧缺失可以接受，
     过半场景 frame15 只剩一个视图看得到球，那落点精度就有个数据层面的天花板。
+
+    num_cams 限定只看训练实际用到的那几路（camera_list[num_cams]）。
+    双视图训练时这一步是必须的：三视图下靠 lower_front 才看得到球的帧，
+    在双视图下是全盲，而 all-blind 的场景在 frame24 指标里是纯噪声。
+    不给就用场景自己声明的全部相机。
+
+    drop_list_path 会把"某个 context 帧全盲"的场景名写出来，用于生成
+    两组实验共用的 scene_list —— 视图数不同各自剔除的场景也不同，
+    不取交集就变成在比数据集难度而不是比视图数。
     """
     per_cell: dict[tuple[int, str], int] = {}
     all_blind: dict[int, int] = {f: 0 for f in CONTEXT_FRAMES}
@@ -487,6 +503,14 @@ def visibility_summary(scene_files, root: Path) -> int:
     n_any_bad = 0
     cams_seen: list[str] = []
     unreadable = 0
+    missing_contract_cam = 0
+    dropped: list[str] = []
+
+    wanted = CAMERA_CONTRACT.get(num_cams) if num_cams else None
+    if num_cams and wanted is None:
+        print(f"[FAIL] no camera contract for num_cams={num_cams}; "
+              f"known: {sorted(CAMERA_CONTRACT)}")
+        return 2
 
     for p in scene_files:
         try:
@@ -499,6 +523,11 @@ def visibility_summary(scene_files, root: Path) -> int:
         if not isinstance(n, int) or not cams:
             unreadable += 1
             continue
+        if wanted is not None:
+            if any(c not in cams for c in wanted):
+                missing_contract_cam += 1
+                continue
+            cams = list(wanted)
         if not cams_seen:
             cams_seen = list(cams)
         mask_by_cam = js.get("ball_visible_mask_by_camera")
@@ -527,6 +556,8 @@ def visibility_summary(scene_files, root: Path) -> int:
                 bad_here = True
             if len(blind_cams) == len(cams):
                 all_blind[f] += 1
+                if p.stem not in dropped:
+                    dropped.append(p.stem)
         if bad_here:
             n_any_bad += 1
 
@@ -539,6 +570,10 @@ def visibility_summary(scene_files, root: Path) -> int:
         print("no usable scenes")
         return 2
     print(f"scenes scanned: {n_scene}")
+    if wanted is not None:
+        print(f"restricted to num_cams={num_cams}: {wanted}")
+        if missing_contract_cam:
+            print(f"skipped {missing_contract_cam} scene(s) missing a contract camera")
     print("")
     print("Counts below = scenes where that camera CANNOT see the ball at that frame.")
     print("")
@@ -572,6 +607,15 @@ def visibility_summary(scene_files, root: Path) -> int:
     print("  so fewer views means a weaker depth estimate, and depth is already ~95% of the")
     print("  frame24 error. Compare the frame15 row against the 6.5cm data before reading any")
     print("  regression on this dataset as a model problem.")
+    if drop_list_path is not None:
+        drop_list_path.parent.mkdir(parents=True, exist_ok=True)
+        drop_list_path.write_text("\n".join(sorted(dropped)) + ("\n" if dropped else ""),
+                                  encoding="utf-8")
+        print("")
+        print(f"wrote {len(dropped)} all-blind scene name(s) to {drop_list_path}")
+        print("Run this for every view count you plan to compare, then train both arms on")
+        print("the UNION of the drop lists removed -- otherwise the two runs see different")
+        print("scenes and the comparison measures dataset difficulty, not view count.")
     print("=" * 72)
     return 0
 
@@ -596,6 +640,11 @@ def main() -> int:
     ap.add_argument("--visibility-summary", action="store_true",
                     help="scan every scene and report how context-frame ball visibility is "
                          "distributed, instead of running the per-scene contract checks")
+    ap.add_argument("--num-cams", type=int, default=None,
+                    help="restrict --visibility-summary to camera_list[N] "
+                         "(2 = front_left+front_right). Default: every declared camera")
+    ap.add_argument("--drop-list", type=Path, default=None,
+                    help="with --visibility-summary: write all-blind scene names here")
     ap.add_argument("--json-only", action="store_true",
                     help="JSON contract checks only, without importing constants.py "
                          "(no torch/numpy needed)")
@@ -628,7 +677,9 @@ def main() -> int:
 
     if args.visibility_summary:
         # 统计模式看的是分布，抽样没有意义，永远跑全量
-        return visibility_summary(scene_files, root)
+        return visibility_summary(scene_files, root,
+                                  num_cams=args.num_cams,
+                                  drop_list_path=args.drop_list)
 
     picked = scene_files if args.limit <= 0 else scene_files[:args.limit]
 

@@ -381,6 +381,16 @@ def _camera_names_from_arguments(arguments, *, role: str) -> list[str]:
     return _validated_camera_names(first, role=role)
 
 
+def camera_names_from_arguments(arguments, *, role: str = "current") -> list[str]:
+    """Named cameras implied by (dataset, num_max_cameras) in a config/args object.
+
+    Public accessor over the same DATASET_DICT["camera_list"] lookup the
+    checkpoint-loading path uses, so evaluation and model init cannot disagree
+    about which physical cameras the view axis carries.
+    """
+    return _camera_names_from_arguments(arguments, role=role)
+
+
 def fix_random_seeds(seed=31):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)

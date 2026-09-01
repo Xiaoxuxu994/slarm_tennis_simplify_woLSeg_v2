@@ -21,8 +21,14 @@ if str(WORKTREE) not in sys.path:
 
 from src.utils.stream25_metrics import (
     ACCEPTANCE_TABLE,
+    # ★ 这两个常量是冻结的三视图默认值，只为向后兼容再导出（测试从本模块 import）。
+    #   运行期一律用 get_camera_order() / get_required_eval_scopes()，
+    #   否则双视图配置下名单对不上，num_views 校验会直接 raise。
     CAMERA_ORDER,
     REQUIRED_EVAL_SCOPES,
+    get_camera_order,
+    get_required_eval_scopes,
+    set_camera_order,
     TIME_BUCKETS,
     worst_normalized_ratio,
     compute_depth_absrel,
@@ -159,23 +165,24 @@ def apply_scoped_acceptance_gates(
     *,
     minimum_valid_count: int = 1,
 ) -> Dict[str, Any]:
-    """Require aggregate and every frozen named view to pass independently."""
-    if tuple(scope_metrics) != REQUIRED_EVAL_SCOPES:
+    """Require aggregate and every named view to pass independently."""
+    required_scopes = get_required_eval_scopes()
+    if tuple(scope_metrics) != required_scopes:
         raise ValueError(
             "Stream25 scope order must be "
-            f"{REQUIRED_EVAL_SCOPES}, got {tuple(scope_metrics)}"
+            f"{required_scopes}, got {tuple(scope_metrics)}"
         )
-    if tuple(scope_valid_counts) != REQUIRED_EVAL_SCOPES:
+    if tuple(scope_valid_counts) != required_scopes:
         raise ValueError(
             "Stream25 valid-count scope order must be "
-            f"{REQUIRED_EVAL_SCOPES}, got {tuple(scope_valid_counts)}"
+            f"{required_scopes}, got {tuple(scope_valid_counts)}"
         )
 
     scope_reports = {}
     combined_gates = {}
     combined_missing = []
     ratios = []
-    for scope in REQUIRED_EVAL_SCOPES:
+    for scope in required_scopes:
         report = apply_acceptance_gates(
             scope_metrics[scope],
             acceptance_table,
@@ -391,11 +398,12 @@ def summarize_stream25_scene_results(
         raise ValueError("Stream25 evaluation requires at least one scene")
     scope_metrics: Dict[str, Dict[str, Any]] = {}
     scope_counts: Dict[str, Dict[str, Dict[str, int]]] = {}
-    for scope in REQUIRED_EVAL_SCOPES:
+    required_scopes = get_required_eval_scopes()
+    for scope in required_scopes:
         scene_scopes = []
         for scene in scene_results:
             scopes = scene.get("scopes")
-            if not isinstance(scopes, dict) or tuple(scopes) != REQUIRED_EVAL_SCOPES:
+            if not isinstance(scopes, dict) or tuple(scopes) != required_scopes:
                 raise ValueError(
                     "each scene must contain aggregate and three named-view scopes"
                 )
@@ -584,10 +592,12 @@ def compute_stream25_scene_metrics(
         padding=5,
     ).reshape_as(ball_mask).bool()
     num_views = pred_rgb.shape[1]
-    if num_views != len(CAMERA_ORDER):
+    camera_order = get_camera_order()
+    if num_views != len(camera_order):
         raise ValueError(
-            f"Stream25 evaluator requires {len(CAMERA_ORDER)} named views, "
-            f"got {num_views}"
+            f"Stream25 evaluator expects {len(camera_order)} named views "
+            f"{camera_order}, got {num_views}. Call set_camera_order() with the "
+            f"camera_list entry for this config's num_max_cameras."
         )
     view_tensors = (
         pred_depth,
@@ -612,7 +622,7 @@ def compute_stream25_scene_metrics(
             rec = {
                 "frame": frame,
                 "eye": eye,
-                "view": CAMERA_ORDER[eye],
+                "view": camera_order[eye],
                 "ball_visible": bool(ball.any()),
                 "rgb_psnr": compute_psnr(pred_rgb[frame, eye].permute(2, 0, 1), gt_rgb[frame, eye].permute(2, 0, 1)),
                 "rgb_ssim": compute_ssim(pred_rgb[frame, eye].permute(2, 0, 1), gt_rgb[frame, eye].permute(2, 0, 1)),
@@ -710,7 +720,7 @@ def compute_stream25_scene_metrics(
         "aggregate": tuple(range(num_views)),
         **{
             camera_name: (eye,)
-            for eye, camera_name in enumerate(CAMERA_ORDER)
+            for eye, camera_name in enumerate(camera_order)
         },
     }
     scopes = {
@@ -885,6 +895,20 @@ def run_evaluation(
         checkpoint_role="evaluation",
     )
     evaluation_seed = set_evaluation_seed(args.seed)
+
+    # gate 报告是按相机名逐视图出的，所以名单必须来自本次 config 的
+    # camera_list[num_max_cameras]，而不是模块里冻结的三视图默认值。
+    # 双视图 (num_max_cameras: 2) 走这一步之后才不会在 num_views 校验处 raise。
+    from src.utils.misc import camera_names_from_arguments
+
+    camera_order = set_camera_order(
+        camera_names_from_arguments(args, role="evaluation")
+    )
+    print(
+        f"[eval] named views ({len(camera_order)}): {', '.join(camera_order)}",
+        flush=True,
+    )
+
     manifest = annotation_path(args, split)
     if split == "final-test":
         from tools.select_stream25_checkpoint import FINAL_TEST_MANIFEST_HASH_KEY
@@ -976,7 +1000,7 @@ def _finalize_and_write(
                 and record["frame"] in frames
                 and record["ball_visible"]
             )
-            for camera_name in CAMERA_ORDER
+            for camera_name in get_camera_order()
         }
         for bucket, frames in TIME_BUCKETS.items()
     }

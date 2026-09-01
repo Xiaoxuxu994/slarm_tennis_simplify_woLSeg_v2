@@ -6,17 +6,63 @@ frozen acceptance contract can be verified without CUDA.
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
 import torch.nn.functional as F
 
+# 三视图是历史默认，也是所有已发布 gate 报告的口径 —— 这两个名字保持不变，
+# 冻结的验收表和现有测试都按它们比对。
 CAMERA_ORDER: Tuple[str, ...] = (
     "front_left",
     "front_right",
     "lower_front",
 )
 REQUIRED_EVAL_SCOPES: Tuple[str, ...] = ("aggregate",) + CAMERA_ORDER
+
+DEFAULT_CAMERA_ORDER: Tuple[str, ...] = CAMERA_ORDER
+
+# ── 运行期的相机名单 ─────────────────────────────────────────────
+#
+# 双视图（num_max_cameras: 2）训练出来的模型渲染出的 view 轴只有 2，而
+# 评测脚本按名字给每个 view 单独出 gate 报告，名单写死就会在
+# eval_stream25_base.py 的 num_views 校验处直接 raise。
+#
+# 所以名单改成运行期可设：评测入口从 config 解出 camera_list[num_max_cameras]
+# 调 set_camera_order()，其余代码一律走 get_camera_order() /
+# get_required_eval_scopes()，不要再读上面那两个常量。
+#
+# ★ 不设就是三视图，行为与改动前逐字节相同。
+_ACTIVE_CAMERA_ORDER: Tuple[str, ...] = DEFAULT_CAMERA_ORDER
+
+
+def set_camera_order(names: Sequence[str]) -> Tuple[str, ...]:
+    """Set the named views this process evaluates. Returns the resolved tuple."""
+    global _ACTIVE_CAMERA_ORDER
+    resolved = tuple(str(name) for name in names)
+    if not resolved:
+        raise ValueError("camera order must name at least one view")
+    if len(set(resolved)) != len(resolved):
+        raise ValueError(f"camera order has duplicate names: {resolved}")
+    _ACTIVE_CAMERA_ORDER = resolved
+    return _ACTIVE_CAMERA_ORDER
+
+
+def reset_camera_order() -> Tuple[str, ...]:
+    """Restore the frozen tri-view default (used by tests and between runs)."""
+    global _ACTIVE_CAMERA_ORDER
+    _ACTIVE_CAMERA_ORDER = DEFAULT_CAMERA_ORDER
+    return _ACTIVE_CAMERA_ORDER
+
+
+def get_camera_order() -> Tuple[str, ...]:
+    """Named views in render order (view axis index -> name)."""
+    return _ACTIVE_CAMERA_ORDER
+
+
+def get_required_eval_scopes() -> Tuple[str, ...]:
+    """Gate scopes: the aggregate plus one per named view."""
+    return ("aggregate",) + _ACTIVE_CAMERA_ORDER
 
 TIME_BUCKETS: Dict[str, List[int]] = {
     "anchor": [0, 3, 6, 9, 12, 15],
@@ -240,10 +286,11 @@ def checkpoint_report_worst_ratio(report: Dict[str, Any]) -> Optional[float]:
     scope_reports = report.get("scope_reports")
     if not isinstance(scope_reports, dict):
         return None
-    if set(scope_reports) != set(REQUIRED_EVAL_SCOPES):
+    required_scopes = get_required_eval_scopes()
+    if set(scope_reports) != set(required_scopes):
         return None
     ratios = []
-    for scope in REQUIRED_EVAL_SCOPES:
+    for scope in required_scopes:
         scope_report = scope_reports[scope]
         if not isinstance(scope_report, dict) or not scope_report.get(
             "all_gates_pass", False
