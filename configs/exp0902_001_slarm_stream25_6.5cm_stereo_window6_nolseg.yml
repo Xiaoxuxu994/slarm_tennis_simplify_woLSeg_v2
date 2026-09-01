@@ -161,9 +161,24 @@ load_from: work_dirs/slarm/exp0827_003_slarm_stream25_6.5cm_triview_window6_nols
 
 train_annotation: scene_list/ball_catch_6.5cm_triview_train.txt
 eval_annotation: scene_list/ball_catch_6.5cm_triview_validation.txt
-num_iterations: 8000
-ckpt_every_n_iters: 1000
-vis_every_n_iters: 2000
+# ★ 20k 不是"跑久一点"，是这个对比能不能成立的前提。
+#
+#   双视图那组要重学的是深度融合（backbone 学的是水平+垂直两个基线三角化，
+#   现在只剩水平），而误差的 95.5% 就在深度方向 —— 要改的恰好是最难改的那部分。
+#   对照组从退火终点出发本来就已收敛，同样步数下它几乎不需要学东西。
+#   给不对称的两组同样的预算，会系统性高估双视图的损失。
+#
+#   lr_sched: cosine 按 num_iterations 铺开 LR 曲线，跑完 LR 已到 min_lr，
+#   想延长只能重启一段新 cosine —— 那是第二个阶段，两组就不可比了。
+#   所以这个数必须一开始定对，中途改不了。
+#
+#   20k x 2 卡 x bs1 = 40k 样本 / 2000 场景 ~ 20 遍，是 stage1 的一半。
+#
+#   跑完先用 verify_sweep 确认两组都 SETTLED 再读结论；
+#   哪一组还在下降，说明它没训够，那次对比不能用。
+num_iterations: 20000
+ckpt_every_n_iters: 2000
+vis_every_n_iters: 4000
 num_vis_samples: 1
 eval_every_n_iters: 50000
 keep_n_ckpts: 10
