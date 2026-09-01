@@ -84,9 +84,52 @@ def make_label(text, w=320, h=20):
 
 
 def depth_to_color(depth, d_min=0.5, d_max=5.0):
+    """Linear turbo ramp over [d_min, d_max] metres.
+
+    A fixed range is only readable when it matches the scene. Anything outside
+    saturates: everything past d_max is the same red, everything before d_min
+    the same blue, and the image stops carrying information. Use
+    depth_display_range() to pick the range from the data instead of guessing.
+    """
     import matplotlib.cm as cm
-    v = np.clip((depth - d_min) / (d_max - d_min), 0, 1)
+    span = max(float(d_max) - float(d_min), 1e-6)
+    v = np.clip((depth - d_min) / span, 0, 1)
+    v = np.nan_to_num(v, nan=0.0, posinf=1.0, neginf=0.0)
     return (cm.get_cmap("turbo")(v)[:, :, :3] * 255).astype(np.uint8)
+
+
+def depth_stats(tensor, max_samples=2_000_000):
+    """Percentiles over the finite, positive samples. None if there are none."""
+    values = tensor.detach().float().reshape(-1).cpu().numpy()
+    values = values[np.isfinite(values) & (values > 0)]
+    if values.size == 0:
+        return None
+    if values.size > max_samples:
+        step = values.size // max_samples + 1
+        values = values[::step]
+    p2, p50, p98 = np.percentile(values, [2, 50, 98])
+    return {"p2": float(p2), "p50": float(p50), "p98": float(p98),
+            "min": float(values.min()), "max": float(values.max()),
+            "n": int(values.size)}
+
+
+def depth_display_range(gt_stats, pred_stats, pad=0.05):
+    """Range covering both GT and prediction, from percentiles not extremes.
+
+    Taken from p2/p98 so a handful of far background pixels or a stray
+    near-zero cannot flatten everything else into one colour, and shared by
+    GT and prediction so the two rows stay comparable. Falls back to whichever
+    side exists.
+    """
+    stats = [s for s in (gt_stats, pred_stats) if s is not None]
+    if not stats:
+        return 0.5, 5.0
+    lo = min(s["p2"] for s in stats)
+    hi = max(s["p98"] for s in stats)
+    if hi - lo < 1e-3:
+        lo, hi = lo - 0.5, hi + 0.5
+    margin = (hi - lo) * pad
+    return lo - margin, hi + margin
 
 
 def semantic_to_color(seg):
@@ -111,6 +154,12 @@ def main():
     p2.add_argument("--lseg_model_scratch_path", default="ckpts/lseg/lseg_model_scratch.pth")
     p2.add_argument("--lseg_model_pretrained_path", default="ckpts/lseg/lseg_model_pretrained_replace_1x1conv_with_linear.pth")
     p2.add_argument("--config", default="configs/slarm_stream25_24cm_triview_window6.yaml")
+    p2.add_argument("--depth-min", "--depth_min", dest="depth_min", type=float, default=None,
+                    help="depth colour ramp lower bound in metres; "
+                         "default: 2nd percentile of this scene's GT+pred depth")
+    p2.add_argument("--depth-max", "--depth_max", dest="depth_max", type=float, default=None,
+                    help="depth colour ramp upper bound in metres; "
+                         "default: 98th percentile of this scene's GT+pred depth")
     extra, remaining = p2.parse_known_args()
 
     from main_slarm import get_args_parser
@@ -192,6 +241,32 @@ def main():
         if pred_t != extra.num_frames:
             pass
 
+        # 色标量程按场景算一次，整段视频和 GT/Pred 两行共用：
+        # 逐帧自适应会让视频闪烁，GT 与 Pred 各自适应则两行不可比。
+        gt_stats = depth_stats(gt_depth) if gt_t > 0 else None
+        pred_stats = depth_stats(rendered_depth)
+        if extra.depth_min is not None and extra.depth_max is not None:
+            d_lo, d_hi = extra.depth_min, extra.depth_max
+            source = "from --depth-min/--depth-max"
+        else:
+            auto_lo, auto_hi = depth_display_range(gt_stats, pred_stats)
+            d_lo = extra.depth_min if extra.depth_min is not None else auto_lo
+            d_hi = extra.depth_max if extra.depth_max is not None else auto_hi
+            source = "auto (p2/p98 of GT+pred)"
+        for name, st in (("gt  ", gt_stats), ("pred", pred_stats)):
+            if st is None:
+                print(f"  depth {name}: no finite positive samples", flush=True)
+            else:
+                print(f"  depth {name}: p2={st['p2']:.2f} p50={st['p50']:.2f} "
+                      f"p98={st['p98']:.2f}  min={st['min']:.2f} max={st['max']:.2f} "
+                      f"n={st['n']}", flush=True)
+        print(f"  depth ramp : {d_lo:.2f} - {d_hi:.2f} m  [{source}]", flush=True)
+        if gt_stats and pred_stats:
+            ratio = pred_stats["p50"] / max(gt_stats["p50"], 1e-6)
+            if ratio > 1.5 or ratio < 0.67:
+                print(f"  [!] pred median depth is {ratio:.2f}x the GT median -- that is a "
+                      f"prediction problem, not a colour-ramp problem", flush=True)
+
         frames = []
         for frame_idx in range(pred_t):
             num_modalities = 3
@@ -214,7 +289,7 @@ def main():
                     gt_img = np.clip(gt_img, 0, 1)
                     gt_img = (gt_img * 255).astype(np.uint8)
                     gt_d = gt_depth[0, frame_idx, cam_idx].cpu().float().numpy()
-                    gt_dc = depth_to_color(gt_d)
+                    gt_dc = depth_to_color(gt_d, d_lo, d_hi)
                     gt_sc = semantic_to_color(
                         gt_semantic[0, frame_idx, cam_idx].cpu().numpy()
                     )
@@ -228,7 +303,7 @@ def main():
                 pred_img = (pred_img * 255).astype(np.uint8)
 
                 pd_d = rendered_depth[0, frame_idx, cam_idx].cpu().float().numpy()
-                pd_dc = depth_to_color(pd_d)
+                pd_dc = depth_to_color(pd_d, d_lo, d_hi)
 
                 if rendered_semantic is not None:
                     pd_s = rendered_semantic[0, frame_idx, cam_idx].cpu().numpy()
@@ -252,8 +327,12 @@ def main():
                 if gt_available
                 else "GT unavailable beyond recorded clip"
             )
-            col_labels_l = make_label(gt_column_label, w=col_label_w, h=18)
-            col_labels_r = make_label("Pred: RGB | Depth | Semantic", w=col_label_w, h=18)
+            col_labels_l = make_label(
+                f"{gt_column_label}  [depth {d_lo:.1f}-{d_hi:.1f}m]",
+                w=col_label_w, h=18)
+            col_labels_r = make_label(
+                f"Pred: RGB | Depth ({d_lo:.1f}-{d_hi:.1f}m) | Semantic",
+                w=col_label_w, h=18)
             col_labels = np.concatenate([col_labels_l, col_labels_r], axis=1)
 
             frame = np.concatenate([label, col_labels, gt_full, pred_full], axis=0)
