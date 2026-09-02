@@ -167,6 +167,30 @@ def _v15_error(per_eye, gt_v15):
     return max(errs) if errs else float("nan")
 
 
+def _axis_errors(per_eye, gt_vec, state_index):
+    """把误差向量拆到 rig 的三个轴，返回 (|ex|, |ey|, |ez|)。
+
+    存在的理由：把"少一路相机"这件事定位到具体方向。
+    front_left/front_right 是水平基线，lower_front 提供的是垂直基线；
+    去掉它如果真的伤在竖直方向，退化就应该集中在 z 轴（重力轴）上，
+    而不是三轴均摊。这个判读决定下一步该改相机摆位还是改模型先验 ——
+    合成的 ‖·‖ 回答不了，必须逐轴看。
+
+    conservative 口径与 _pos15_error / _v15_error 一致：取总误差最大的那个视图。
+    """
+    if gt_vec is None:
+        return None
+    best = None
+    for state in per_eye:
+        if state is None:
+            continue
+        err = state[state_index] - gt_vec
+        total = float(err.norm().item())
+        if best is None or total > best[0]:
+            best = (total, [abs(float(err[i].item())) for i in range(3)])
+    return best[1] if best is not None else None
+
+
 def _balltoken_errors(ball_state, gt_pos24, gt_pos15, gt_v15, dt, gravity):
     """ball token 一路：直接回归的 pos15/v15 + 已知重力外推到 frame24。
 
@@ -316,6 +340,31 @@ def main():
         print(f"{src:8s} {'v15_error':16s} {med:10.4f} {p95:10.4f} {len(finite):8d}")
     print("=" * 72)
 
+    # ①d pos15 / v15 的 rig 轴向分解
+    #    z 是重力轴。水平基线 (front_left/front_right) 对竖直方向的约束最弱，
+    #    所以砍掉 lower_front 若真的伤在垂直视差上，退化会集中在 z。
+    #    三轴均摊则说明只是整体噪声变大，改相机摆位帮不上，该往模型先验走。
+    print(f"{'region':8s} {'axis_split':14s} {'x_med':>9s} {'y_med':>9s} {'z_med':>9s} "
+          f"{'z_share':>9s} {'n':>6s}")
+    print("-" * 72)
+    for label, gt_index, state_index in (("pos15", 2, 0), ("v15", 3, 1)):
+        for src in sources:
+            # per_scene = (scene_states, gt_pos24, gt_pos15, gt_v15, dt, ball_state)
+            rows = [
+                _axis_errors(scene[0][src], scene[gt_index], state_index)
+                for scene in per_scene
+            ]
+            rows = [r for r in rows if r is not None]
+            if not rows:
+                print(f"{src:8s} {label:14s} {'-':>9s} {'-':>9s} {'-':>9s} {'-':>9s} {0:6d}")
+                continue
+            meds = [finite_percentile([r[i] for r in rows], 50) for i in range(3)]
+            total = sum(m * m for m in meds)
+            z_share = (meds[2] * meds[2] / total) if total > 0 else float("nan")
+            print(f"{src:8s} {label:14s} {meds[0]:9.4f} {meds[1]:9.4f} {meds[2]:9.4f} "
+                  f"{z_share:9.1%} {len(rows):6d}")
+    print("=" * 72)
+
     # ② frame24 落点误差（三种外推 × 球区域来源）
     print(f"{'region':8s} {'extrap':12s} {'median':>10s} {'p95':>10s} {'n_valid':>8s}")
     print("-" * 72)
@@ -369,6 +418,11 @@ def main():
     print("  gt x * << pred x *  -> ball selection is the bottleneck -> ball token")
     print("  frame24 minus pos15  -> contribution of v15 (velocity) + extrapolation")
     print("  v15_error x dt(~0.3)  ~= that extrapolation contribution")
+    print("  axis_split z_share: fraction of the squared median error on the gravity axis.")
+    print("    Isotropic noise sits near 33%. Well above that means the vertical direction")
+    print("    is the weak one, which is what dropping a vertical-baseline camera predicts,")
+    print("    and the fix is camera placement. Near 33% means it is plain added noise and")
+    print("    placement will not help -- spend the effort on the trajectory prior instead.")
     print("  balltoken x frame24 << pred x phys  -> ball token beats the per-pixel path")
     print("  balltoken pos15_error vs pred pos15_error  -> where the gain actually comes from")
 
