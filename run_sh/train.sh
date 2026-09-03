@@ -43,6 +43,16 @@ RESUME=0
 # 已把 render chunk 降到 2、步数减到 12k；显存还不够就把 chunk 降到 1。
 # CONFIG="configs/exp0901_002_slarm_stream25_v3_0829_native_triview_window6_nolseg_finetune.yml"
 #
+# ── 0902_fixed 冒烟测试（9/03，真实场景 GS 渲染，50 场景）──
+# 不是要出结论的实验。看的只有"训练 loss 降不降"：45 个场景跑 89 遍还记不住，
+# 就是管线有问题（路径 / 内参 / 可见性 / 坐标系），不是数据少。
+# 验证集只有 5 个场景，它的指标是噪声，别拿去和任何基线比。
+# ★ 开跑前四步见 config 抬头：make_scene_list -> register_dataset --dataset
+#   -> check_dataset_contract -> check_model_init。裸数据树没有 scene_list，
+#   不建的话 dataloader 第一行就失败。
+# ★ load_from 里填的是退火终点 ckpt_005999，若你指的是别的 ckpt 先改掉。
+# CONFIG="configs/exp0903_001_slarm_stream25_0902fixed_triview_window6_nolseg_debug.yml"
+#
 # ── 视图数消融（9/02，6.5cm 数据）──
 # 两份 config 逐键相同，只差 num_max_cameras 2 vs 3。必须成对跑：
 # 拿双视图去比 ckpt_005999 本身是错的（那个差里混了"多训 8k 步"这个变量）。

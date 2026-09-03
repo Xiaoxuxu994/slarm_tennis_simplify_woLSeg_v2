@@ -64,6 +64,10 @@ def main() -> int:
         description="Register a new dataset in constants.py, reading its real name "
                     "from the annotation JSON instead of retyping it.")
     ap.add_argument("--data-root", required=True, type=Path)
+    ap.add_argument("--dataset", default=None,
+                    help="restrict to scene_list files whose name contains this. "
+                         "Required once a data_root holds more than one dataset, "
+                         "otherwise the first list wins and the wrong one is read")
     ap.add_argument("--write", action="store_true",
                     help="apply the edit (constants.py.bak is kept)")
     args = ap.parse_args()
@@ -73,6 +77,25 @@ def main() -> int:
     if not lists:
         print(f"[FAIL] no scene_list/*.txt under {root}")
         return 2
+
+    # 一个 data_root 下可以有多批数据（v3_0829 和 0902_fixed 就共用一个 root）。
+    # 不过滤的话下面"取第一条读得出的标注"会读到别的数据集，然后报告
+    # "已经注册过了" —— 一个看起来成功、实际什么都没做的结果。
+    if args.dataset:
+        scoped = [l for l in lists if args.dataset in l.stem]
+        if not scoped:
+            print(f"[FAIL] no scene_list/*.txt matching {args.dataset!r} under {root}")
+            print(f"       available: {[l.name for l in lists]}")
+            print("       Build them first: tools/make_scene_list.py")
+            return 2
+        lists = scoped
+    else:
+        stems = {l.stem.replace("_train", "").replace("_validation", "")
+                 .replace("_final_test", "") for l in lists}
+        if len(stems) > 1:
+            print(f"[FAIL] {root}/scene_list holds more than one dataset: {sorted(stems)}")
+            print("       Pass --dataset <name> so the right one is read.")
+            return 2
 
     # 找第一条能读出来的标注
     js = first = None
@@ -184,8 +207,10 @@ def main() -> int:
         print("Dry run. Re-run with --write to apply (constants.py.bak is kept first).")
         print("")
         print("Then, in order:")
-        print(f"    python tools/check_dataset_contract.py --data-root {root} --limit 10")
-        print(f"    python tools/check_dataset_contract.py --data-root {root} --visibility-summary")
+        print(f"    python tools/check_dataset_contract.py --data-root {root} \\")
+        print(f"        --annotation scene_list/{train_txt} --limit 10")
+        print(f"    python tools/check_dataset_contract.py --data-root {root} \\")
+        print(f"        --annotation scene_list/{train_txt} --visibility-summary --limit 0")
         return 0
 
     _, end_datasets = _dict_span(src, "DATASETS = {")
