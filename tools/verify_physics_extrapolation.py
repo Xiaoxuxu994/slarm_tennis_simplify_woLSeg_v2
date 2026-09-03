@@ -248,6 +248,12 @@ def main():
     args_cli = ap.parse_args()
 
     gravity = torch.tensor([float(x) for x in args_cli.gravity.split(",")], dtype=torch.float32)
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+
+    args = load_stream25_args(args_cli.config, checkpoint_path=args_cli.checkpoint,
+                              checkpoint_role="evaluation")
+
     # 接球帧：命令行 > config > 未知。它同时是「外推到哪还算数」的物理边界。
     catch_frame = args_cli.catch_frame
     if catch_frame is None:
@@ -275,11 +281,6 @@ def main():
               f"extrapolation stops where the ball is actually caught.")
     if not target_frames:
         target_frames = [24]
-    device = torch.device("cuda")
-    dtype = torch.bfloat16
-
-    args = load_stream25_args(args_cli.config, checkpoint_path=args_cli.checkpoint,
-                              checkpoint_role="evaluation")
     dataset = build_stream25_dataset(args, args_cli.split, online_feat=False)
     model = build_stream25_model(args, device)
     model.eval()
