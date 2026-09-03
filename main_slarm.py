@@ -312,6 +312,14 @@ def get_args_parser():
         type=str,
         default=None,
                         )
+    # 球被接住的帧号。轨迹在这一帧之后不再是自由抛体，所以任何超过它的外推
+    # 都没有物理意义 —— 评测工具用它来划定「外推到哪里还算数」的边界。
+    # ★ 不要从标注 JSON 的 first_contact_frame 读：0902_fixed 那个字段是用
+    #   frame 15 而不是出手帧做对称回落算的，整整差了 15 帧（声明 30，实为 45）。
+    # 0 = 未知，此时评测不外推到 24 之后。
+    parser.add_argument("--stream25_catch_frame", type=int, default=0,
+                        help="frame at which the ball is caught; extrapolation past "
+                             "it is physically meaningless (0 = unknown)")
     parser.add_argument("--stream25_semantic_class_weights", type=float, nargs=4, default=None,
                         help="frozen train-only inverse-sqrt weights for four task classes")
 

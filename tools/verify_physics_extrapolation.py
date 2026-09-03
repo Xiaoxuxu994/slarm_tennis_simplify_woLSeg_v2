@@ -234,6 +234,10 @@ def main():
     ap.add_argument("--checkpoint", required=True)
     ap.add_argument("--split", default="validation")
     ap.add_argument("--limit", type=int, default=0, help="只跑前 N 个场景（0=全部）")
+    ap.add_argument("--catch-frame", "--catch_frame", dest="catch_frame",
+                    type=int, default=None,
+                    help="球被接住的帧号，覆盖 config 的 stream25_catch_frame。"
+                         "它是外推有效性的边界，也会被自动加进目标帧")
     ap.add_argument("--target-frames", "--target_frames", dest="target_frames",
                     default="24",
                     help="逗号分隔的落点目标帧，例如 24,30,40。>24 的帧没有标注，"
@@ -244,7 +248,31 @@ def main():
     args_cli = ap.parse_args()
 
     gravity = torch.tensor([float(x) for x in args_cli.gravity.split(",")], dtype=torch.float32)
+    # 接球帧：命令行 > config > 未知。它同时是「外推到哪还算数」的物理边界。
+    catch_frame = args_cli.catch_frame
+    if catch_frame is None:
+        catch_frame = int(getattr(args, "stream25_catch_frame", 0) or 0)
+    catch_frame = catch_frame if catch_frame > 0 else None
+
     target_frames = sorted({int(x) for x in args_cli.target_frames.split(",") if x.strip()})
+    if not target_frames:
+        target_frames = [24]
+    if catch_frame is not None and catch_frame not in target_frames:
+        target_frames = sorted(target_frames + [catch_frame])
+
+    # 过了接球帧真值就不再走抛物线了，那之后的数字没有物理意义 —— 直接不算，
+    # 而不是算出来再让人自己记得别读。
+    if catch_frame is not None:
+        beyond = [f for f in target_frames if f > catch_frame]
+        if beyond:
+            print(f"[skip] target frames {beyond} are past the catch frame "
+                  f"{catch_frame}; the ball is no longer in free flight there and "
+                  f"the ground truth stops following the parabola")
+            target_frames = [f for f in target_frames if f <= catch_frame]
+    elif max(target_frames) > 24:
+        print(f"[warn] scoring past frame 24 without a catch frame. Set "
+              f"stream25_catch_frame in the config (or pass --catch-frame) so the "
+              f"extrapolation stops where the ball is actually caught.")
     if not target_frames:
         target_frames = [24]
     device = torch.device("cuda")
@@ -420,6 +448,9 @@ def main():
             print("-" * 72)
     if max(target_frames) > 24:
         print("")
+        if catch_frame is not None:
+            print(f"  catch frame = {catch_frame} (config: stream25_catch_frame). "
+                  f"Targets past it are dropped.")
         print(f"  frames past 24 have no annotation. Both sides are extrapolated with the")
         print(f"  same analytic ballistic, which is exact for this data (second difference")
         print(f"  of position is -9.8100, velocity agrees to 1e-5 m/s), so the comparison")

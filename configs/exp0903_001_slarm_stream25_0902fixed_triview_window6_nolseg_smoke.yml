@@ -74,6 +74,20 @@ num_context_timesteps: 6
 num_target_timesteps: 7
 context_stride: 3
 timespan: 0.8                              # ★ ③ 的重力自洽检查会验证这个数
+
+# ---- 接球帧：外推有效性的边界 ----
+# 球在这一帧之后不再是自由抛体，任何超过它的外推都没有物理意义。
+# 评测工具（verify_physics_extrapolation --target-frames）用它划界，超过就不算。
+#
+# ★ 不要用标注 JSON 里的 first_contact_frame，那个字段是错的。
+#   抛体关于顶点严格对称，回到某个高度的帧号可以直接算：
+#       顶点            frame 22.58
+#       回到 frame15 高度 frame 30.15   离地 3.678 m   <- JSON 写的 30
+#       回到出手高度      frame 45.15   离地 1.213 m   <- 实际接球点
+#   两者是同一个公式、不同参考帧，差值恰好 15 = 上下文窗口末帧。
+#   3.678 m 的接球高度物理上也不成立。
+#   已由实测确认真实接球在第 45 帧。
+stream25_catch_frame: 45
 mode: window_6
 
 use_affine_token: true
