@@ -51,7 +51,7 @@ RESUME=0
 #   -> check_dataset_contract -> check_model_init。裸数据树没有 scene_list，
 #   不建的话 dataloader 第一行就失败。
 # ★ load_from 里填的是退火终点 ckpt_005999，若你指的是别的 ckpt 先改掉。
-# CONFIG="configs/exp0903_001_slarm_stream25_0902fixed_triview_window6_nolseg_debug.yml"
+# CONFIG="configs/exp0903_001_slarm_stream25_0902fixed_triview_window6_nolseg_smoke.yml"
 #
 # ── 视图数消融（9/02，6.5cm 数据）──
 # 两份 config 逐键相同，只差 num_max_cameras 2 vs 3。必须成对跑：

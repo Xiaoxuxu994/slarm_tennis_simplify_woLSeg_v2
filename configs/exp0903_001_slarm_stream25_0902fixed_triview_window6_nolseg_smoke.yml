@@ -1,0 +1,156 @@
+# 0902_fixed 数据 · 真实场景 GS 渲染 · 三视图 · 冒烟实验（smoke test）
+#
+# ═══════════════════════════════════════════════════════════════
+# ★ 这不是一次要出结论的实验，是一次冒烟测试。
+#
+#   50 个场景、45 训 5 验。任何验证指标都是 5 个场景上的数，噪声远大于
+#   信号 —— 别拿它和三视图基线（frame24 0.026）比，那个比较没有意义。
+#
+#   要看的只有一件事：**训练 loss 降不降**。
+#   50 个场景 2000 步 ≈ 40 遍，模型应该能把它们记住。
+#   记不住就说明管线有问题（路径、内参、可见性、坐标系），
+#   而不是"数据太少"—— 数据少恰恰应该更容易过拟合。
+#
+#   这个判据比任何验证指标都灵敏：能过拟合 = 管线通了，等全量数据即可。
+# ═══════════════════════════════════════════════════════════════
+#
+# ── 开跑前三步，缺一不可 ────────────────────────────────────────
+#
+#   ① 建 scene_list（裸数据树没有这个文件，dataloader 第一行就会失败）
+#        python tools/make_scene_list.py --data-root data/slarm_data \
+#            --dataset ball_catch_triview_0902_fixed --val-count 5
+#        python tools/make_scene_list.py --data-root data/slarm_data \
+#            --dataset ball_catch_triview_0902_fixed --val-count 5 --write
+#
+#   ② 注册到 constants.py（★ 必须带 --dataset：这个 root 下现在有两批数据，
+#      不加会读到 v3_0829 然后报"已注册"，一个看起来成功实际没做事的结果）
+#        python tools/register_dataset.py --data-root data/slarm_data \
+#            --dataset ball_catch_triview_0902_fixed
+#        python tools/register_dataset.py --data-root data/slarm_data \
+#            --dataset ball_catch_triview_0902_fixed --write
+#
+#   ③ 契约自检（★ 不要加 --no-images，语义图与声明的一致性只有带图才查）
+#        python tools/check_dataset_contract.py --data-root data/slarm_data \
+#            --annotation scene_list/ball_catch_triview_0902_fixed_train.txt --limit 5
+#        python tools/check_dataset_contract.py --data-root data/slarm_data \
+#            --annotation scene_list/ball_catch_triview_0902_fixed_train.txt \
+#            --visibility-summary --limit 0
+#
+#   ④ 模型初始化自检（missing 应为空、unexpected 应为 0）
+#        python tools/check_model_init.py --config <本文件>
+#
+# ── ★ load_from 需要你确认 ──────────────────────────────────────
+#
+#   你说的是"59999 那个 ckpt"，但仓库里没有任何 config 引用过 59999，
+#   现有最好的起点是退火终点 ckpt_005999（你自己的对比表里的
+#   Exp004-nolseg-cosanneal-ckpt005999：frame24 0.026/0.070）。
+#   下面先填它。跑之前核对一下实际有哪些：
+#        ls work_dirs/slarm/*/checkpoints/ | sort -u
+#   如果真有 59999，一条命令改掉：
+#        sed -i 's|^load_from:.*|load_from: <正确路径>|' <本文件>
+#
+# ── 真实 GS 渲染数据的已知风险 ──────────────────────────────────
+#
+#   ★ 若深度图是 3DGS 渲染出来的（而非仿真 z-buffer），
+#     stream25_depth_relative_weight 要降到 0.50。
+#     GS 渲染深度是 alpha 加权的期望深度，在物体边缘、薄结构、半透明处
+#     系统性落在前后表面之间；拿它当权重 1.0 的稠密监督，等于让模型
+#     去拟合渲染器的伪影。
+#     判断：跑一次 zero-shot 评测，depth_absrel 明显高于 6.5cm 仿真的
+#     0.019 就多半是渲染深度。球深度权重无论如何维持 0.5 —— 球心由几何
+#     精确给出，那才是落点真正依赖的量。
+model: slarm
+dataset: [ball_catch_triview_0902_fixed]   # ★ 必须与标注 JSON 的 "dataset" 字段逐字一致
+data_root: data/slarm_data                 # 图像在 <root>/datasets/<dataset>/...（datasets.py:283）
+                                           # 标注在 scene_list 里写的相对路径（datasets.py:192）
+
+input_size: [320, 240]                     # (H, W)，不是 (W, H)
+patch_size: 8
+embed_dim: 768
+depth: 12
+patch_embed: conv
+num_max_cameras: 3
+num_context_timesteps: 6
+num_target_timesteps: 7
+context_stride: 3
+timespan: 0.8                              # ★ ③ 的重力自洽检查会验证这个数
+mode: window_6
+
+use_affine_token: true
+use_sky_token: true
+use_ms3_motion: true
+use_last_token: true
+shortcut_rgb: true
+add_patch_plucker_embed: true
+sigmoid_rgb: true
+num_motion_tokens: 0
+
+strict_data_loading: true
+enable_task_semantic_head: true
+terminal_context_extrapolation: true
+stream25_render_target_chunk_size: 7
+stream25_reconstruction_loss: true
+
+# ---- 不开 ball token ----
+# 新 domain 的第一次接入不该带上未证实的模块。三种配置在 6.5cm 上都输给像素法，
+# 先把基线立住。
+use_ball_token: false
+use_ball_token_intrunk: false
+
+# ---- 损失权重：与 exp0901_001 一致 ----
+stream25_rgb_weight: 1.00
+stream25_lpips_weight: 0.05
+stream25_ball_rgb_weight: 0.50
+stream25_depth_relative_weight: 1.00   # ★ 若深度来自 GS 渲染而非 z-buffer，降到 0.50，见抬头
+stream25_ball_depth_metric_weight: 0.5 # 球深度来自几何，可信，不降
+stream25_semantic_weight: 1.00
+stream25_ms3_ball_weight: 1.00
+stream25_ms3_static_weight: 0.25
+stream25_opacity_weight: 0.10
+
+stream25_ms3_velocity_scale: 5.0
+stream25_ms3_acceleration_scale: 9.81
+stream25_ms3_jerk_scale: 1.0
+terminal_dynamic_velocity_threshold: 1.0
+stream25_semantic_class_weight_cap: 10.0
+
+# ---- 无 LSeg ----
+online_feat: false
+enable_feat_loss: false
+feat_loss_coeff: 0.0
+stream25_lseg_feature_weight: 0.0
+enable_depth_loss: true
+enable_sky_opacity_loss: true
+enable_perceptual_loss: true
+perceptual_weight: 0.05
+perceptual_loss_start_iter: 0
+load_depth: true
+
+# ---- 优化 ----
+# LR 沿用 exp0901_001（同为从退火终点做 domain 迁移），只把 warmup 按步数缩放：
+# 1000 步 warmup 在 2000 步的运行里是一半的预算，那会让人看不出 loss 到底降没降。
+lr: 5.0e-5
+stream25_trunk_lr: 5.0e-6
+lr_sched: cosine                     # ★ 不许改。constant 跑到底会让末点 ckpt
+                                     #   只是盆地里的一次采样（stage1 摆动 3.5x 的教训）
+min_lr: 1.0e-7
+warmup_iters: 100
+batch_size: 1                        # per-GPU；全局 batch = 1 x 卡数，代码里无梯度累积
+seed: 20260903
+
+load_from: work_dirs/slarm/exp0827_003_slarm_stream25_6.5cm_triview_window6_nolseg_anneal/checkpoints/ckpt_005999.pth
+
+train_annotation: scene_list/ball_catch_triview_0902_fixed_train.txt
+eval_annotation: scene_list/ball_catch_triview_0902_fixed_validation.txt
+
+# ---- 冒烟节奏：快出信号 ----
+# 2000 步 x 2 卡 x bs1 = 4000 样本 / 45 场景 ~ 89 遍。够过拟合了。
+# 250 步就出一次视频，1000 步内就能判断管线通没通，不用等跑完。
+num_iterations: 2000
+ckpt_every_n_iters: 500
+vis_every_n_iters: 250
+num_vis_samples: 1
+eval_every_n_iters: 50000            # 冒烟测试不跑完整 eval，5 个验证场景的 gate 没有意义
+keep_n_ckpts: 4
+project: slarm
+exp_name: exp0903_001_slarm_stream25_0902fixed_triview_window6_nolseg_smoke
