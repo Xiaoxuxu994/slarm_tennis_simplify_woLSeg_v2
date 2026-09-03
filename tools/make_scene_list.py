@@ -40,30 +40,43 @@ import sys
 from pathlib import Path
 
 
+# 场景标注必须有这些顶层键才可能被 dataloader 用起来。
+# 拿它们当判据而不是文件名：场景目录里常常还有相机参数、渲染日志之类的 JSON，
+# 只按 *.json 收会把它们一起写进 scene_list，然后训练在第一次 __getitem__ 崩掉。
+ANNOTATION_KEYS = ("dataset", "num_timesteps", "relative_image_path")
+
+
+def looks_like_annotation(path: Path, dataset: str) -> bool:
+    """这个 JSON 是不是本数据集的场景标注。"""
+    try:
+        js = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:                                        # noqa: BLE001
+        return False
+    if not isinstance(js, dict):
+        return False
+    if js.get("dataset") != dataset:
+        return False
+    return all(k in js for k in ANNOTATION_KEYS)
+
+
 def find_annotation_jsons(root: Path, dataset: str) -> tuple[list[Path], str]:
     """定位这个 dataset 的标注 JSON。返回 (paths, 用了哪种搜法)。
 
-    先查约定目录，查不到再全局扫描并按 JSON 里的 "dataset" 字段过滤 ——
-    目录布局各批数据不完全一致，但 "dataset" 字段是 dataloader 真正依赖的东西
-    （constants.py 的两张表都用它做 key），拿它过滤不会错。
+    先查约定目录，查不到再全局扫。两条路径都按 looks_like_annotation 过滤 ——
+    "dataset" 字段是 dataloader 真正依赖的东西（constants.py 两张表都用它做 key），
+    比目录布局可靠；而且场景目录里往往还躺着别的 JSON，不过滤就会混进来。
     """
     for sub in ("annotations", "datasets"):
         base = root / sub / dataset
         if base.is_dir():
-            found = sorted(base.rglob("*.json"))
+            found = sorted(p for p in base.rglob("*.json")
+                           if looks_like_annotation(p, dataset))
             if found:
                 return found, f"{sub}/{dataset}/**/*.json"
 
-    # 兜底：全局扫，按 dataset 字段过滤。慢，但只在布局不合约定时才走到
-    found = []
-    for p in sorted(root.rglob("*.json")):
-        if dataset not in str(p):
-            continue
-        try:
-            if json.loads(p.read_text(encoding="utf-8")).get("dataset") == dataset:
-                found.append(p)
-        except Exception:                                    # noqa: BLE001
-            continue
+    # 兜底：全局扫。慢，但只在布局不合约定时才走到
+    found = sorted(p for p in root.rglob("*.json")
+                   if dataset in str(p) and looks_like_annotation(p, dataset))
     return found, 'rglob + "dataset" field match'
 
 
@@ -109,22 +122,37 @@ def main() -> int:
     print(f"found     : {len(found)} annotation JSON(s)")
     if not found:
         print("")
-        print("[FAIL] no annotation JSON found. Check the dataset name against the")
-        print("       'dataset' field inside one of the JSON files -- constants.py keys")
-        print("       on that string, and a mismatch is a KeyError much later.")
+        print("[FAIL] no annotation JSON matched. A file counts only when its top level")
+        print(f"       has {list(ANNOTATION_KEYS)} and 'dataset' equals {args.dataset!r}.")
+        print("")
+        # 列出这个 root 下实际有哪些数据集，比让人回去翻目录有用得多。
+        # 最常见的失败就是名字差一点（多一段、少一段、下划线不同）。
+        dirs = sorted({d.name for sub in ("annotations", "datasets")
+                       if (root / sub).is_dir()
+                       for d in (root / sub).iterdir() if d.is_dir()})
+        if dirs:
+            print(f"       Dataset directories under {root}:")
+            for d in dirs:
+                mark = "  <- closest to what you passed" if (
+                    args.dataset in d or d in args.dataset) else ""
+                print(f"         {d}{mark}")
+            print("       Re-run with --dataset set to the one you want.")
+        else:
+            print(f"       No annotations/ or datasets/ directory under {root} at all.")
+            print("       Check the data-root against the actual tree.")
         return 2
 
-    # 核对 dataset 字段，名字对不上的话后面 DATASETS/DATASET_DICT 都取不到
+    # 已按 dataset 字段过滤过，这里只是把接入前该核对的事实摊开
     sample = json.loads(found[0].read_text(encoding="utf-8"))
-    declared = sample.get("dataset", "")
-    print(f"declared  : {declared!r}")
-    if declared != args.dataset:
-        print("")
-        print(f"[FAIL] the JSON declares {declared!r} but --dataset says {args.dataset!r}.")
-        print("       These must match exactly. Re-run with --dataset " + repr(declared))
-        return 1
+    print(f"sample    : {found[0].relative_to(root)}")
+    print(f"declared  : {sample.get('dataset')!r}")
     print(f"cameras   : {sample.get('camera_list')}")
     print(f"timesteps : {sample.get('num_timesteps')}")
+    n_ts = sample.get("num_timesteps")
+    if not isinstance(n_ts, int) or n_ts < 25:
+        print("")
+        print(f"[FAIL] num_timesteps={n_ts}; Stream25 needs at least 25 frames")
+        return 1
     print("")
 
     train_idx, val_idx = split_indices(len(found), args.val_count)
