@@ -169,11 +169,15 @@ def temporal_background_check(js: dict, root: Path) -> str:
         if sa is not None and sb is not None and sa.shape[:2] == a.shape[:2]:
             keep &= (sa != BALL_CLASS_ID) & (sb != BALL_CLASS_ID)
         if keep.any():
-            diffs.append(float(np.abs(a[keep] - b[keep]).max()))
+            diffs.append(np.abs(a[keep] - b[keep]).ravel())
     if not diffs:
         return "no comparable pixels"
-    return (f"max |depth[t+1] - depth[t]| off the ball, over {len(diffs)} pairs: "
-            f"{max(diffs):.6f} m")
+    a = np.concatenate(diffs)
+    n = a.size
+    return ("|depth[t+1]-depth[t]| off the ball  "
+            f"p50 {np.percentile(a,50):.4f}  p95 {np.percentile(a,95):.4f}  "
+            f"p99.9 {np.percentile(a,99.9):.4f}  max {a.max():.4f} m   "
+            f"[{(a > 0.05).mean():.3%} of pixels move >5cm]")
 
 
 def main() -> int:
@@ -242,6 +246,12 @@ def main() -> int:
         a = np.asarray(errs)
         print(f"  {label:34s}: n={a.size}  median {np.median(a):+.4f} m  "
               f"p95 |.| {np.percentile(np.abs(a), 95):.4f} m  max |.| {np.abs(a).max():.4f} m")
+    print("")
+    print("")
+    print("  Expected offset: the depth map records the ball's FRONT SURFACE while the")
+    print("  trajectory records its CENTRE. Averaged over the visible disc that is")
+    print(f"  -(2/3)r = {-2/3*0.065/2:+.4f} m, and no pixel can exceed r = {0.065/2:.4f} m.")
+    print("  A median near that value with a bound at r is a clean z-buffer, not an error.")
     print("")
     print("  Near zero  -> the renderer writes a proper z-buffer depth for the ball.")
     print("               Dense depth supervision is trustworthy, weights stay as they are.")
