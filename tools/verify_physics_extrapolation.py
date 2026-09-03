@@ -120,6 +120,23 @@ def _scene_error(per_eye, gt_pos24, dt, gravity, strategy):
     return max(errs) if errs else float("nan")
 
 
+def gt_position_at(frame, gt_pos24, gt_v24, dt24, dt_target, gravity):
+    """真值在任意目标帧的位置。
+
+    这批数据的轨迹是**解析弹道**（位置二阶差分精确等于重力，速度与位置满足
+    中点法则到 1e-5 m/s），所以 frame 24 之后的真值不需要标注 —— 从最后一帧
+    的位置和速度加已知重力就能精确外推出来。
+
+    这让"预测能外推多远"变成一个可测量的问题：预测和真值往同一个目标帧外推，
+    两者之差就是那个时刻的误差，不需要任何新的 GT。
+
+    ★ 只在球未被打断时成立。过了接球/落地的时刻，真值本身就不再走这条抛物线，
+      那之后的数字没有物理意义。
+    """
+    d = dt_target - dt24
+    return gt_pos24 + gt_v24 * d + 0.5 * gravity * d * d
+
+
 def _pos15_error(per_eye, gt_pos15):
     """pos15 起点误差 = ‖pred_pos15 − gt_pos15‖（选球 + depth 反投影的合成误差）。
 
@@ -217,12 +234,19 @@ def main():
     ap.add_argument("--checkpoint", required=True)
     ap.add_argument("--split", default="validation")
     ap.add_argument("--limit", type=int, default=0, help="只跑前 N 个场景（0=全部）")
+    ap.add_argument("--target-frames", "--target_frames", dest="target_frames",
+                    default="24",
+                    help="逗号分隔的落点目标帧，例如 24,30,40。>24 的帧没有标注，"
+                         "预测与真值都用解析弹道外推到那里 —— 只在球未被接住/落地前有效")
     ap.add_argument("--gravity", default="0,0,-9.81", help="rig 系下的重力向量，逗号分隔")
     ap.add_argument("--ball-mask-source", choices=["pred", "gt", "both"], default="both",
                     help="球区域来源：pred(预测语义==1) / gt(GT ball_ms3_mask) / both(对照)")
     args_cli = ap.parse_args()
 
     gravity = torch.tensor([float(x) for x in args_cli.gravity.split(",")], dtype=torch.float32)
+    target_frames = sorted({int(x) for x in args_cli.target_frames.split(",") if x.strip()})
+    if not target_frames:
+        target_frames = [24]
     device = torch.device("cuda")
     dtype = torch.bfloat16
 
@@ -235,7 +259,7 @@ def main():
     n = len(dataset) if args_cli.limit <= 0 else min(args_cli.limit, len(dataset))
     print(f"[verify] {args_cli.split}: {n}/{len(dataset)} scenes | gravity(rig)={gravity.tolist()}", flush=True)
 
-    per_scene = []          # 每场景：(per_eye_states, gt_pos24, gt_pos15, gt_v15, dt, ball_state)
+    per_scene = []          # 每场景：(per_eye_states, gt_pos24, gt_pos15, gt_v15, dt, ball_state, targets)
     gt_accel_samples = []   # GT 球加速度(rig) 采样，用于核对重力
 
     for index in range(n):
@@ -250,10 +274,20 @@ def main():
         canonical_to_rig = prepared["context_canonical_to_rig"][0, -1].float().cpu()
         gt_pos24 = prepared["ball_position_rig"][0, 24].float().cpu()
         gt_pos15 = prepared["ball_position_rig"][0, 15].float().cpu()
+        gt_v24 = prepared["ball_velocity_rig"][0, 24].float().cpu()
         dt = float(
             (prepared["target_time"][0, 24, 0] - prepared["context_time"][0, -1, 0]).item()
             * args.timespan
         )
+        # 每帧步长由 frame15 -> frame24 这段反推，不假设 fps
+        dt_per_frame = dt / (24 - 15)
+        # 目标帧 -> (真值位置, 从 frame15 起的 dt)。<=24 用标注，>24 解析外推。
+        targets = {}
+        for tf in target_frames:
+            dt_tf = (tf - 15) * dt_per_frame
+            g = (prepared["ball_position_rig"][0, tf].float().cpu() if tf <= 24
+                 else gt_position_at(tf, gt_pos24, gt_v24, dt, dt_tf, gravity))
+            targets[tf] = (g, dt_tf)
         # 球区域来源：pred(预测语义==1) 和/或 gt(GT ball mask)
         regions = {}
         if args_cli.ball_mask_source in ("pred", "both"):
@@ -287,7 +321,7 @@ def main():
             if scene.get("ball_pos15") is None
             else (scene["ball_pos15"], scene["ball_v15"])
         )
-        per_scene.append((scene_states, gt_pos24, gt_pos15, gt_v15, dt, ball_state))
+        per_scene.append((scene_states, gt_pos24, gt_pos15, gt_v15, dt, ball_state, targets))
 
         del input_dict, target_dict, prepared, scene
         print(
@@ -307,7 +341,7 @@ def main():
     print(f"{'region':8s} {'metric':16s} {'median':>10s} {'p95':>10s} {'n_valid':>8s}")
     print("-" * 72)
     for src in sources:
-        errs = [_pos15_error(states[src], gp15) for (states, _g24, gp15, _gv, _dt, _bt) in per_scene]
+        errs = [_pos15_error(states[src], gp15) for (states, _g24, gp15, _gv, _dt, _bt, _tg) in per_scene]
         finite = [e for e in errs if e == e]
         med = finite_percentile(finite, 50) if finite else float("nan")
         p95 = finite_percentile(finite, 95) if finite else float("nan")
@@ -318,7 +352,7 @@ def main():
     print(f"{'region':8s} {'pos15_split':14s} {'along_med':>10s} {'along_p95':>10s} {'lat_med':>10s} {'lat_p95':>10s}")
     print("-" * 72)
     for src in sources:
-        decs = [_pos15_decompose(states[src], gp15) for (states, _g24, gp15, _gv, _dt, _bt) in per_scene]
+        decs = [_pos15_decompose(states[src], gp15) for (states, _g24, gp15, _gv, _dt, _bt, _tg) in per_scene]
         decs = [d for d in decs if d is not None]
         along = [d[0] for d in decs]
         lateral = [d[1] for d in decs]
@@ -333,7 +367,7 @@ def main():
     print(f"{'region':8s} {'metric':16s} {'median':>10s} {'p95':>10s} {'n_valid':>8s}")
     print("-" * 72)
     for src in sources:
-        errs = [_v15_error(states[src], gv) for (states, _g24, _gp15, gv, _dt, _bt) in per_scene]
+        errs = [_v15_error(states[src], gv) for (states, _g24, _gp15, gv, _dt, _bt, _tg) in per_scene]
         finite = [e for e in errs if e == e]
         med = finite_percentile(finite, 50) if finite else float("nan")
         p95 = finite_percentile(finite, 95) if finite else float("nan")
@@ -349,7 +383,7 @@ def main():
     print("-" * 72)
     for label, gt_index, state_index in (("pos15", 2, 0), ("v15", 3, 1)):
         for src in sources:
-            # per_scene = (scene_states, gt_pos24, gt_pos15, gt_v15, dt, ball_state)
+            # per_scene = (scene_states, gt_pos24, gt_pos15, gt_v15, dt, ball_state, targets)
             rows = [
                 _axis_errors(scene[0][src], scene[gt_index], state_index)
                 for scene in per_scene
@@ -365,23 +399,37 @@ def main():
                   f"{z_share:9.1%} {len(rows):6d}")
     print("=" * 72)
 
-    # ② frame24 落点误差（三种外推 × 球区域来源）
-    print(f"{'region':8s} {'extrap':12s} {'median':>10s} {'p95':>10s} {'n_valid':>8s}")
+    # ② 落点误差（目标帧 × 三种外推 × 球区域来源）
+    #    >24 的目标帧两边都用解析弹道外推：真值从 frame24 的位置+速度+重力算出来，
+    #    预测从模型的 pos15/v15 算出来。这批数据的轨迹是精确抛物线，所以真值那一侧
+    #    没有近似 —— "预测能撑多远"因此是可测量的，不需要标注更多帧。
+    print(f"{'region':8s} {'frame':>5s} {'extrap':12s} {'median':>10s} {'p95':>10s} {'n_valid':>8s}")
     print("-" * 72)
-    for src in sources:
-        for strat, name in [("free", "free(current)"), ("phys", "phys(gravity)"), ("linear", "linear")]:
-            errs = [
-                _scene_error(states[src], g24, dt, gravity, strat)
-                for (states, g24, _gp15, _gv, dt, _bt) in per_scene
-            ]
-            finite = [e for e in errs if e == e]  # 去 nan
-            med = finite_percentile(finite, 50) if finite else float("nan")
-            p95 = finite_percentile(finite, 95) if finite else float("nan")
-            print(f"{src:8s} {name:12s} {med:10.4f} {p95:10.4f} {len(finite):8d}")
+    for tf in target_frames:
+        for src in sources:
+            for strat, name in [("free", "free(current)"), ("phys", "phys(gravity)"), ("linear", "linear")]:
+                errs = [
+                    _scene_error(states[src], tg[tf][0], tg[tf][1], gravity, strat)
+                    for (states, _g24, _gp15, _gv, _dt, _bt, tg) in per_scene
+                ]
+                finite = [e for e in errs if e == e]  # 去 nan
+                med = finite_percentile(finite, 50) if finite else float("nan")
+                p95 = finite_percentile(finite, 95) if finite else float("nan")
+                print(f"{src:8s} {tf:>5d} {name:12s} {med:10.4f} {p95:10.4f} {len(finite):8d}")
+        if tf != target_frames[-1]:
+            print("-" * 72)
+    if max(target_frames) > 24:
+        print("")
+        print(f"  frames past 24 have no annotation. Both sides are extrapolated with the")
+        print(f"  same analytic ballistic, which is exact for this data (second difference")
+        print(f"  of position is -9.8100, velocity agrees to 1e-5 m/s), so the comparison")
+        print(f"  is valid -- but only until the ball is caught or lands. Past that the")
+        print(f"  ground truth stops following the parabola and the numbers mean nothing.")
     # ③ ball token 一路（region=balltoken）：与上面三个像素法口径同批场景对比
+    bt_frame = target_frames[-1]
     bt_rows = [
-        _balltoken_errors(bt, g24, gp15, gv, dt, gravity)
-        for (_states, g24, gp15, gv, dt, bt) in per_scene
+        _balltoken_errors(bt, tg[bt_frame][0], gp15, gv, tg[bt_frame][1], gravity)
+        for (_states, _g24, gp15, gv, _dt, bt, tg) in per_scene
     ]
     bt_finite = [row for row in bt_rows if row[0] == row[0]]
     if bt_finite:
