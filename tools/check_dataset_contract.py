@@ -265,6 +265,9 @@ def check_scene(js: dict, entry: dict, data_root: Path, timespan: float,
         else:
             rep.add(PASS, scope, f"{key} has {n} entries for every camera")
 
+    # ---- 生产方自己声明的风险 ----
+    _check_provenance(js, scope, rep)
+
     # ---- 图像文件真的在不在 ----
     # 标注 JSON 的路径对，不代表图像路径对 —— 它们是两棵树：
     #   标注: <root>/<scene_list 里写的相对路径>          datasets.py:192
@@ -372,6 +375,41 @@ def check_scene(js: dict, entry: dict, data_root: Path, timespan: float,
         # 再复现 dataloader 里被 pass 掉的 preflight（这步要读语义图）
         if check_images:
             _check_visibility(js, cams, n, data_root, scope, rep, declared)
+
+
+# source_provenance 里这些字段说明标签不是真值，或者坐标约定变了。
+# 没有任何代码读 source_provenance，所以这些警告写在 JSON 里等于没写 ——
+# 转成 WARN 打出来，免得有人拿一个合成标签的 IoU 去追模型问题。
+_PROVENANCE_FLAGS = {
+    "floor_repair": (
+        "the floor label was synthesised (morphological repair), so it is a "
+        "plausible label rather than ground truth. Fine as training supervision, "
+        "but floor_iou and semantic_miou both include class 2 "
+        "(stream25_metrics.compute_macro_dice, num_classes=4) and are therefore "
+        "not evidence about the model on this dataset"),
+    "world_frame_note": (
+        "the world frame convention changed. Nothing in the pipeline intersects "
+        "the ground, so training and the frame24 metric are unaffected, but any "
+        "absolute height compared against another batch is not comparable"),
+    "mask_moving_depth": None,      # 只回显，不判定
+    "semantic_mode": None,
+    "focal_spec": None,
+}
+
+
+def _check_provenance(js: dict, scope: str, rep: Report) -> None:
+    prov = js.get("source_provenance")
+    if not isinstance(prov, dict):
+        return
+    for key, message in _PROVENANCE_FLAGS.items():
+        if key not in prov:
+            continue
+        value = str(prov[key])
+        shown = value if len(value) <= 90 else value[:87] + "..."
+        if message:
+            rep.add(WARN, scope, f"source_provenance.{key}: {shown}  -- {message}")
+        else:
+            rep.add(PASS, scope, f"source_provenance.{key}: {shown}")
 
 
 def _check_image_files(js: dict, cams, n: int, data_root: Path,
