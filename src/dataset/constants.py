@@ -30,6 +30,10 @@ DATASETS = {
     "ball_catch_triview_v3_0829": {"opencv2dataset": opencv2waymo, "canonical_to_flu": np.eye(4)},
     # 同一批数据的原生分辨率版本（480 宽 x 640 高）。坐标约定不随分辨率变化。
     "ball_catch_triview_v3_0829_native": {"opencv2dataset": opencv2waymo, "canonical_to_flu": np.eye(4)},
+    # 0902_fixed：同一套坐标约定。rig_to_world 是单矩阵（z 平移 +1），本质是世界系
+    # 的平移，所以天然惯性 —— 相机逐帧变只是相机相对 rig 在动。已验证：球的位置
+    # 二阶差分 -9.809981，速度与位置满足中点法则到 1e-5 m/s，是精确解析弹道。
+    "ball_catch_triview_0902_fixed": {"opencv2dataset": opencv2waymo, "canonical_to_flu": np.eye(4)},
 }
 
 waymo_train = "scene_list/waymo_train.txt"  # NOTE: Use full data for multi-GPU
@@ -254,6 +258,31 @@ DATASET_DICT = {
         "num_target_timesteps": 7,
         "annotation_txt_file_train": "scene_list/ball_catch_triview_v3_0829_native_train.txt",
         "annotation_txt_file_val": "scene_list/ball_catch_triview_v3_0829_native_validation.txt",
+        "camera_list": {
+            2: ["front_left", "front_right"],
+            3: ["front_left", "front_right", "lower_front"],
+        },
+        "ref_camera": "front_left",
+    },
+
+    # 0902_fixed（data_root: data/slarm_data，与 v3_0829 共用一个 root）。
+    #
+    # ★ lower_front 从中段起看不到球：不是视场问题（球整段都投影在画面中央，
+    #   frame 15 时距中心不到 9 px），是**接球网兜遮挡**。50 个场景里 39 个
+    #   在 frame 15 —— 也就是外推锚点 —— 只剩 front_left/front_right 这对
+    #   纯水平基线，垂直视差在最关键的一帧缺失。
+    #   这是真实机构的忠实再现，不是数据缺陷：真相机同样会被网挡住。
+    #
+    # ★ 接球在第 45 帧，不是标注里 first_contact_frame 写的 30。那个字段是用
+    #   frame 15 而非出手帧做对称回落算出来的，差值恰好 15 = 上下文窗口末帧。
+    #   评测用 config 的 stream25_catch_frame，别读这个字段。
+    "ball_catch_triview_0902_fixed": {
+        "size": [320, 240],
+        "temporal": True,
+        "num_context_timesteps": 6,
+        "num_target_timesteps": 7,
+        "annotation_txt_file_train": "scene_list/ball_catch_triview_0902_fixed_train.txt",
+        "annotation_txt_file_val": "scene_list/ball_catch_triview_0902_fixed_validation.txt",
         "camera_list": {
             2: ["front_left", "front_right"],
             3: ["front_left", "front_right", "lower_front"],
