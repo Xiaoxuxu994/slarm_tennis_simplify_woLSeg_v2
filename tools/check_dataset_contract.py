@@ -265,6 +265,14 @@ def check_scene(js: dict, entry: dict, data_root: Path, timespan: float,
         else:
             rep.add(PASS, scope, f"{key} has {n} entries for every camera")
 
+    # ---- 图像文件真的在不在 ----
+    # 标注 JSON 的路径对，不代表图像路径对 —— 它们是两棵树：
+    #   标注: <root>/<scene_list 里写的相对路径>          datasets.py:192
+    #   图像: <root>/datasets/<dataset>/<relative_image_path>   datasets.py:283
+    # 而 datasets.py:284 是裸的 Image.open()，没有守卫。路径错了要等到训练
+    # 第一步才炸，那时模型已经建完、数据集已经加载完了。
+    _check_image_files(js, cams, n, data_root, scope, rep)
+
     # ---- 球轨迹 ----
     bt = js["ball_trajectory"]
     r2w = bt.get("rig_to_world")
@@ -364,6 +372,49 @@ def check_scene(js: dict, entry: dict, data_root: Path, timespan: float,
         # 再复现 dataloader 里被 pass 掉的 preflight（这步要读语义图）
         if check_images:
             _check_visibility(js, cams, n, data_root, scope, rep, declared)
+
+
+def _check_image_files(js: dict, cams, n: int, data_root: Path,
+                      scope: str, rep: Report, probe_frames: int = 6) -> None:
+    """按 dataloader 的拼法解析图像路径，确认文件存在。
+
+    只 stat 不读图，所以没有 cv2/PIL 也能跑，而且很快。默认抽查前 probe_frames
+    帧的每个相机；抽查够用是因为一个场景的图像通常一起产出，缺就整批缺，
+    而全量 stat 在大数据集上会拖慢这个本该秒回的检查。
+    """
+    dataset_name = js.get("dataset", "")
+    if not dataset_name:
+        return
+    table = js.get("relative_image_path")
+    if not isinstance(table, dict):
+        return
+
+    idxs = sorted({int(i * (n - 1) / max(probe_frames - 1, 1)) for i in range(probe_frames)})
+    missing: list[str] = []
+    checked = 0
+    for cam in cams:
+        paths = table.get(cam)
+        if not isinstance(paths, list):
+            continue
+        for i in idxs:
+            if i >= len(paths):
+                continue
+            full = data_root / "datasets" / dataset_name / paths[i]
+            checked += 1
+            if not full.exists():
+                missing.append(str(full))
+
+    if not checked:
+        rep.add(WARN, scope, "relative_image_path held nothing to probe")
+    elif missing:
+        rep.add(FAIL, scope,
+                f"{len(missing)}/{checked} probed image files do not exist, "
+                f"e.g. {missing[0]}")
+        rep.add(FAIL, scope,
+                "the dataloader opens exactly this path (datasets.py:283) with no "
+                "guard, so training would crash on its first step")
+    else:
+        rep.add(PASS, scope, f"all {checked} probed image files exist")
 
 
 def _declared_visibility(js: dict, cams, n: int, scope: str,
