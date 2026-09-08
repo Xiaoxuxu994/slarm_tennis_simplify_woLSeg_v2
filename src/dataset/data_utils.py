@@ -349,6 +349,11 @@ def prepare_inputs_and_targets(
         input_dict["ball_mask"] = data_dict["context"]["ball_mask"]
         input_dict["ball_position_rig"] = data_dict["context"]["position_rig"]
         input_dict["ball_velocity_rig"] = data_dict["context"]["velocity_rig"]
+        # 绝对时间戳（秒），[b, context_t]。轨迹一致性损失要的是"相对 frame 15 的
+        # dt"，而 target 侧已有的 ball_dt 是相对**第一个 target 帧**的，基准不同，
+        # 不能拿来用。两侧都传绝对值，由损失侧统一减去终端 context 帧的时刻。
+        if "timestamp" in data_dict["context"]:
+            input_dict["ball_timestamp"] = data_dict["context"]["timestamp"]
     if "canonical_to_rig" in data_dict["context"]:
         input_dict["context_canonical_to_rig"] = data_dict["context"]["canonical_to_rig"]
     if "task_semantic" in data_dict["context"]:
@@ -436,6 +441,7 @@ def prepare_inputs_and_targets(
         target_dict["ball_position_rig"] = data_dict["target"]["position_rig"]
         target_dict["ball_velocity_rig"] = data_dict["target"]["velocity_rig"]
         target_timestamps = data_dict["target"]["timestamp"]
+        target_dict["ball_timestamp"] = target_timestamps
         ball_dt = target_timestamps - target_timestamps[:, :1]
         ball_dt[:, 0] = 0.0
         target_dict["ball_dt"] = ball_dt

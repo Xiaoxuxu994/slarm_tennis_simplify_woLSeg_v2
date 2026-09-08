@@ -27,6 +27,10 @@ STREAM25_LOSS_WEIGHTS: Dict[str, float] = {
     # 内建 ball token 监督（默认权重 1.0；仅在模型输出 ball_pos15 时生效）
     "ball_pos": 1.0,
     "ball_vel": 1.0,
+    # 轨迹一致性 / 落点。★ 默认 0 = 关闭，不开就完全不改变既有行为，
+    # 之前所有实验的复现性不受影响。开法见 configs/exp0909_001_*。
+    "ball_traj": 0.0,
+    "landing": 0.0,
 }
 
 STREAM25_MS3_SCALES = {"velocity": 5.0, "acceleration": 9.81, "jerk": 1.0}
@@ -36,6 +40,53 @@ STREAM25_BALL_DEPTH_TAIL_FRACTION = 0.10
 STREAM25_BALL_DEPTH_TAIL_WEIGHT = 0.50
 STREAM25_LSEG_MSE_CHUNK_ELEMENTS = 1_048_576
 STREAM25_LPIPS_CHUNK_IMAGES = 1
+
+
+def ball_states_to_positions(
+    pos15: torch.Tensor,
+    v15: torch.Tensor,
+    dt: torch.Tensor,
+    gravity_rig: torch.Tensor,
+) -> torch.Tensor:
+    """把 (pos15, v15) 这 6 个自由度展开成任意时刻的位置。
+
+    重力已知且标注是精确解析弹道（0903_2k 实测速度一阶差分 a_z = -9.809990，
+    x 严格匀速），所以这 6 个数完全决定整条轨迹 —— 加速度不是网络的自由度，
+    不会被 dt**2 放大。
+
+    Args:
+        pos15: ``[b, 3]`` 终端 context 帧（frame 15）的球心，rig 系。
+        v15:   ``[b, 3]`` 同一帧的速度。
+        dt:    ``[b, T]`` 各帧相对 frame 15 的时间差（秒），可正可负。
+        gravity_rig: ``[3]``。
+
+    Returns:
+        ``[b, T, 3]``
+    """
+    from src.utils.stream25_metrics import integrate_frame24_position_physics
+
+    return integrate_frame24_position_physics(
+        pos15[:, None, :], v15[:, None, :], dt[..., None], gravity_rig
+    )
+
+
+def stream25_catch_dt_from_args(args: Any) -> Optional[float]:
+    """接球帧相对 frame 15 的物理时长（秒）。没配 catch frame 时返回 None。
+
+    帧号到秒的换算从 timespan 和冻结的帧契约推出来，不写死 fps ——
+    timespan 是 frame 0 到最后一个 target 帧的时长。
+    """
+    from src.dataset.stream25 import (
+        STREAM25_ALL_TARGET_FRAMES,
+        STREAM25_CONTEXT_FRAMES,
+    )
+
+    catch_frame = int(getattr(args, "stream25_catch_frame", 0) or 0)
+    if catch_frame <= 0:
+        return None
+    span_frames = STREAM25_ALL_TARGET_FRAMES[-1] - STREAM25_ALL_TARGET_FRAMES[0]
+    per_frame = float(getattr(args, "timespan", 0.8)) / float(span_frames)
+    return (catch_frame - STREAM25_CONTEXT_FRAMES[-1]) * per_frame
 
 
 def stream25_weights_from_args(args: Any) -> Dict[str, float]:
@@ -278,6 +329,126 @@ def _macro_dice(logits: torch.Tensor, labels: torch.Tensor, num_classes: int = 4
     return dice_sum / max(count, 1)
 
 
+def ball_trajectory_losses(
+    pos_pred: torch.Tensor,
+    vel_pred: torch.Tensor,
+    pos_gt: torch.Tensor,
+    vel_gt: torch.Tensor,
+    *,
+    input_dict: Dict,
+    target: Dict,
+    weights: Dict[str, float],
+    catch_dt: Optional[float] = None,
+) -> Dict[str, torch.Tensor]:
+    """轨迹一致性 + 落点。两项都只用已经在 batch 里的标注，不需要新数据。
+
+    返回的键集合只取决于 ``weights`` 和 ``catch_dt``（都是全局 config），不随
+    batch 内容变化 —— DDP 下逐键 all_reduce 要求各 rank 键集合一致，否则卡死。
+    """
+    out: Dict[str, torch.Tensor] = {}
+    # ---- 为什么需要这两项：ball_vel 的归一化尺度是按错误的 dt 定的 ----
+    #
+    # ★ 先排除一个看起来很像但**不成立**的理由：不是"监督太稀"。标注是精确解析
+    #   弹道，13 帧的位置全都由 (pos15, v15) 这 6 个数导出，不含任何新信息。
+    #   最优点完全一样，变的只是损失几何。别拿"用满标注"当卖点。
+    #
+    # 真正的问题在尺度。上面 BALL_POS_SCALE_METERS 那段注释已经推过：
+    #     vel_scale = pos_scale / dt
+    # 让两项的权重与它们对落点的贡献成比例。但那里的 dt 取的是
+    # ball_vel_scale_from_timespan —— frame 15 -> 最后一个 target 帧 = 0.3 s。
+    #
+    # 而实际目标在接球帧：0903_2k 是 frame 45，dt = 1.0 s。
+    # 所以速度**仍然被降权了 1.0 / 0.3 = 3.33 倍** —— 与 2026-08-31 那次
+    # "取 1.0 导致降权 3.3 倍"是同一个错误，只是高了一层。
+    #
+    # 实测佐证：v15 误差 0.4116 m/s，乘接球杠杆臂 1.005 s = 41.4 cm；
+    # 实测 frame45 中位误差 43.9 cm。速度单独解释了 94%，而它正是被降权的那一项。
+    #
+    # 由此得到两项，各自的作用要分清：
+    #
+    #   landing（主项）：把残差直接放在接球帧，杠杆臂 1.0 s。这是原理上正确的
+    #       修法 —— 不再猜尺度，直接优化目标量。
+    #
+    #   ball_traj（辅项）：用 13 个不同杠杆臂的帧去约束同样 6 个自由度，
+    #       代替两个手挑的尺度常数。改的是损失几何（Hessian），不是最优点。
+    #       收益比 landing 小，但几乎不要成本，且能防止只优化端点而牺牲窗口内精度。
+    #
+    # ★ 开跑前务必先跑那个一行的对照组：stream25_ball_vel_scale: 0.1
+    #   （= 0.1 m / 1.0 s）。它不改一行代码就能拿到 landing 的大部分效果。
+    #   如果对照组打平，这两项就不值得留。
+    _want_traj = float(weights.get("ball_traj", 0.0)) > 0.0
+    _want_landing = float(weights.get("landing", 0.0)) > 0.0 and catch_dt is not None
+    if not (_want_traj or _want_landing):
+        # 提前返回，别让 _g / _ctx_ts 只在某个分支里绑定 —— 那正是本仓库
+        # 已经踩过一次的 UnboundLocalError 的形状。
+        return out
+
+    from src.dataset.stream25 import MS3_GRAVITY_RIG
+
+    _g = pos_pred.new_tensor(MS3_GRAVITY_RIG)
+    _ctx_ts = input_dict.get("ball_timestamp")
+    if _ctx_ts is None:
+        # 硬失败而不是静默跳过。这个仓库里"if cond: pass"式的空校验已经
+        # 让好几个契约违规一路跑到评测才暴露；权重开着却没有监督信号，
+        # 是那类 bug 里最贵的一种（loss 曲线好看，估计量没被约束）。
+        raise RuntimeError(
+            "stream25_ball_traj_weight/landing_weight are on but "
+            "input_dict['ball_timestamp'] is missing. The dataset must "
+            "provide per-frame timestamps (data_utils.prepare_inputs_and_targets)."
+        )
+    _b = pos_pred.shape[0]
+    _t15 = _ctx_ts[:, -1:].to(pos_pred.dtype).to(pos_pred.device)
+
+    # 轨迹一致性：13 帧（context 6 + target 7）。速度误差 dv 在某帧的位置残差
+    # 恰好是 dv * |dt|（重力项在 pred 与 gt 之间抵消），所以远端帧对速度的惩罚
+    # 天然更重 —— 这就是"用多个杠杆臂代替一个手挑尺度"的全部含义。
+    if _want_traj:
+        _tgt_ts = target.get("ball_timestamp")
+        _tgt_pos = target.get("ball_position_rig")
+        _ts_list = [_ctx_ts.to(pos_pred.dtype).to(pos_pred.device)]
+        _pos_list = [input_dict["ball_position_rig"]]
+        if _tgt_ts is not None and _tgt_pos is not None:
+            _ts_list.append(_tgt_ts.to(pos_pred.dtype).to(pos_pred.device))
+            _pos_list.append(_tgt_pos)
+        _dt_all = torch.cat(_ts_list, dim=1) - _t15                    # [b, T]
+        _p_gt = torch.cat(
+            [p.reshape(_b, p.shape[1], -1)[..., :3] for p in _pos_list], dim=1
+        ).to(pos_pred.dtype).to(pos_pred.device)                      # [b, T, 3]
+        _p_hat = ball_states_to_positions(pos_pred, vel_pred, _dt_all, _g)
+        traj_loss = F.smooth_l1_loss(
+            _p_hat / BALL_POS_SCALE_METERS, _p_gt / BALL_POS_SCALE_METERS
+        )
+        out["stream25_ball_traj_raw"] = traj_loss.detach()
+        out["stream25_ball_traj_loss"] = weights["ball_traj"] * traj_loss
+        out["stream25_ball_traj_frames"] = pos_pred.new_tensor(
+            float(_dt_all.shape[1])
+        )
+        out["stream25_ball_traj_l2_m"] = (
+            (_p_hat.float() - _p_gt.float()).norm(dim=-1).mean().detach()
+        )
+
+    # ---- 落点：直接优化目标量，不再靠猜尺度 ----
+    # 真值用解析外推（标注不需要有那一帧）—— 与
+    # tools/verify_physics_extrapolation.py 的 gt_position_at 同一个公式。
+    # 重力项在 pred 与 gt 之间完全抵消，所以这一项等价于
+    #     |dp15 + dv15 * catch_dt|
+    # 即"位置误差 + 速度误差 x 接球杠杆臂"，正是接球成败依赖的那个量。
+    if _want_landing:
+        _dt_c = pos_pred.new_full((pos_pred.shape[0], 1), float(catch_dt))
+        _pred_catch = ball_states_to_positions(pos_pred, vel_pred, _dt_c, _g)
+        _gt_catch = ball_states_to_positions(pos_gt, vel_gt, _dt_c, _g)
+        landing_loss = F.smooth_l1_loss(
+            _pred_catch / BALL_POS_SCALE_METERS, _gt_catch / BALL_POS_SCALE_METERS
+        )
+        out["stream25_landing_raw"] = landing_loss.detach()
+        out["stream25_landing_loss"] = weights["landing"] * landing_loss
+        out["stream25_landing_dt_s"] = pos_pred.new_tensor(float(catch_dt))
+        out["stream25_landing_l2_m"] = (
+            (_pred_catch.float() - _gt_catch.float()).norm(dim=-1).mean().detach()
+        )
+    return out
+
+
 def compute_stream25_loss(
     pred: Dict[str, torch.Tensor],
     target: Dict[str, torch.Tensor],
@@ -291,6 +462,7 @@ def compute_stream25_loss(
     ms3_tail_weight: float = STREAM25_MS3_TAIL_WEIGHT,
     ball_depth_tail_fraction: float = STREAM25_BALL_DEPTH_TAIL_FRACTION,
     ball_depth_tail_weight: float = STREAM25_BALL_DEPTH_TAIL_WEIGHT,
+    catch_dt: Optional[float] = None,
 ) -> Dict[str, torch.Tensor]:
     """Compute the ten Stream25 loss terms (spec §6.2)."""
     output = pred
@@ -486,6 +658,14 @@ def compute_stream25_loss(
         )
         loss_dict["stream25_ball_vel_l2_ms"] = (
             (vel_pred.float() - vel_gt.float()).norm(dim=-1).mean().detach()
+        )
+
+        loss_dict.update(
+            ball_trajectory_losses(
+                pos_pred, vel_pred, pos_gt, vel_gt,
+                input_dict=input_dict, target=target,
+                weights=weights, catch_dt=catch_dt,
+            )
         )
 
     total = sum(v for k, v in loss_dict.items() if k.endswith("_loss") and k != "stream25_total_loss")

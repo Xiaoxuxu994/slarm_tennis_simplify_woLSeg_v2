@@ -1,0 +1,185 @@
+# 0903_2k · ball token（in-trunk）· 实验组 B：轨迹一致性 + 落点损失
+#
+# ═══════════════════════════════════════════════════════════════
+# ★ 这一组的存在意义是"证伪"。
+#
+#   诊断：ball_vel 的归一化尺度 vel_scale = pos_scale / dt 里，dt 取的是
+#   frame 15 -> 最后一个 target 帧 = 0.3 s；而实际目标在接球帧 frame 45，
+#   dt = 1.0 s。速度因此被降权 3.33 倍。
+#
+#   实测佐证：v15 误差 0.4116 m/s x 接球杠杆臂 1.005 s = 41.4 cm，
+#   实测 frame45 中位误差 43.9 cm —— 速度单独解释了 94%，而它正是被降权的那项。
+#
+#   对照组 A（exp0908_002）用一行常数修同一个问题。本组用两个损失项：
+#
+#     landing（主项，权重 1.0）：把残差直接放在接球帧，杠杆臂 1.0 s。
+#         原理上正确 —— 不再猜尺度，直接优化目标量。真值由解析外推给出
+#         （与 verify_physics_extrapolation.gt_position_at 同一公式），
+#         不需要标注里有第 45 帧。
+#
+#     ball_traj（辅项，权重 0.5）：用 13 帧不同的杠杆臂约束同样 6 个自由度。
+#         ★ 它不是"更多监督" —— 13 帧的位置全由 (pos15, v15) 导出，
+#           不含新信息，最优点完全一样。它改的是损失几何，
+#           作用是防止只优化端点而牺牲窗口内精度。
+#
+#   ★ 必须在 exp0908_002 之后跑。先跑这组的话，涨了也分不清是常数的功劳
+#     还是损失项的功劳。
+# ═══════════════════════════════════════════════════════════════
+#
+# ── 与 exp0908_002 的差异（只有三键）────────────────────────────
+#     stream25_ball_vel_scale     未设（自动 0.333）  vs  0.1
+#     stream25_ball_traj_weight   0.5                vs  0.0
+#     stream25_landing_weight     1.0                vs  0.0
+#   其余逐键相同，包括 seed。两组之差 = 这三键之差，没有别的解释。
+#
+# ── 起点 ────────────────────────────────────────────────────────
+#   0903_2k 全量微调的终点。★ 那一组跑完再开，且先确认它的 frame24 指标
+#   比 ckpt_005999 的 zero-shot 有改善 —— 在一个更差的 backbone 上加
+#   ball token，测出来的是 backbone 的问题不是 token 的。
+#
+# ── 为什么是 in-trunk 不是外挂 ──────────────────────────────────
+#   slarm.py:1641 那段注释说得对：外挂版是 aggregator 跑完之后的 post-hoc
+#   probe，"只能读 backbone 已算好的表征，改变不了 backbone 算什么"。
+#   而下游要的是一个可靠的球状态向量，那需要 backbone 为它改变表征。
+#
+model: slarm
+dataset: [ball_catch_triview_0903_2k]   # ★ 必须与标注 JSON 的 "dataset" 字段逐字一致
+data_root: data/slarm_data              # 图像在 <root>/datasets/<dataset>/...（datasets.py:283）
+
+input_size: [320, 240]                  # (H, W)，不是 (W, H)。写反内参会互换且不报错
+patch_size: 8
+embed_dim: 768
+depth: 12
+patch_embed: conv
+num_max_cameras: 3
+num_context_timesteps: 6
+num_target_timesteps: 7
+context_stride: 3
+timespan: 0.8                           # ③ 的重力自洽检查会验证这个数
+mode: window_6
+
+# ---- 接球帧：外推有效性的边界 ----
+# 标注里有两个字段都指向 frame 30，都不能用：
+#     first_contact_frame = 30      -> 用 frame 15（而非出手帧）做对称回落算的
+#     catch_plane_x_rig   = -0.4200 -> 解出来正好 frame 29.0000
+# 后者看着像独立佐证，其实是同一个错误换个轴写了一遍。判据是高度：
+#     顶点              frame 22.58
+#     回到 frame15 高度  frame 30.15   离地 3.766 m   <- 两个字段都指这里，物理上不成立
+#                                                       （相机 rig 才 1.5 m 高）
+#     回到出手高度       frame 45.15   离地 1.213 m   <- 实际接球点
+# 差值恰好 15 = 上下文窗口末帧 STREAM25_CONTEXT_FRAMES[-1]。
+stream25_catch_frame: 45
+
+use_affine_token: true
+use_sky_token: true
+use_ms3_motion: true
+use_last_token: true
+shortcut_rgb: true
+add_patch_plucker_embed: true
+sigmoid_rgb: true
+num_motion_tokens: 0
+
+strict_data_loading: true
+enable_task_semantic_head: true
+terminal_context_extrapolation: true
+stream25_render_target_chunk_size: 7
+stream25_reconstruction_loss: true
+
+# ---- 不开 ball token ----
+# 三种 ball token 配置在 6.5cm 上都输给像素法。换 domain 的第一次全量训练不该
+# 同时引入未证实的模块，否则涨跌归因不了。先把这批数据的基线立住。
+use_ball_token: false      # ★ 外挂版关掉。两个都开会同时收梯度，归因不了
+use_ball_token_intrunk: true      # ★ in-trunk：走完全部 attention 层，能改变 backbone 算什么
+ball_token_freeze_backbone: false   # ★ 放开 backbone。in-trunk 的全部意义就是让 backbone
+                                    #   为球状态改变它算的东西；冻住就退化成外挂版
+stream25_ball_pos_weight: 1.0
+stream25_ball_vel_weight: 1.0
+
+# ---- 损失权重：与 exp0901_001 / exp0903_001 逐键相同 ----
+# 一个都不改是有意的：这次唯一要回答的问题是"换了外观 domain，同一套配方能到哪"。
+stream25_rgb_weight: 1.00
+stream25_lpips_weight: 0.05
+stream25_ball_rgb_weight: 0.50
+stream25_depth_relative_weight: 1.00    # z-buffer 已判定，不降（见抬头）
+stream25_ball_depth_metric_weight: 0.5
+stream25_semantic_weight: 1.00
+stream25_ms3_ball_weight: 1.00
+stream25_ms3_static_weight: 0.25
+stream25_opacity_weight: 0.10
+
+# ---- 本组的唯一变量：速度归一化尺度 ----
+# 现有默认由 ball_vel_scale_from_timespan 推出 = 0.1 m / 0.3 s = 0.333，
+# 那个 0.3 s 是 frame 15 -> 24。但目标在接球帧 frame 45，dt = 1.0 s。
+# 于是速度被降权了 1.0/0.3 = 3.33 倍 —— 与 2026-08-31 "取 1.0 降权 3.3 倍"
+# 是同一个错误，只是高了一层。这里按真实目标重定：0.1 m / 1.0 s。
+#
+# ★ 这一组不动一行代码。它是 exp0908_003 的对照：如果两组打平，
+#   轨迹/落点损失就不值得留 —— 那说明全部收益都来自这个常数。
+# stream25_ball_vel_scale: 未设 -> 自动 0.333（保持默认，让 landing 项去承担杠杆臂）
+
+# 新的两项在本组保持关闭（默认就是 0，这里显式写出来是为了让两份 config 逐键可比）
+stream25_ball_traj_weight: 0.5    # 辅项：13 个杠杆臂代替手挑常数，改损失几何
+stream25_landing_weight: 1.0    # 主项：残差直接放在 stream25_catch_frame
+
+stream25_ms3_velocity_scale: 5.0
+stream25_ms3_acceleration_scale: 9.81
+stream25_ms3_jerk_scale: 1.0
+terminal_dynamic_velocity_threshold: 1.0
+stream25_semantic_class_weight_cap: 10.0
+
+# ---- 无 LSeg ----
+online_feat: false
+enable_feat_loss: false
+feat_loss_coeff: 0.0
+stream25_lseg_feature_weight: 0.0
+enable_depth_loss: true
+enable_sky_opacity_loss: true
+enable_perceptual_loss: true
+perceptual_weight: 0.05
+perceptual_loss_start_iter: 0
+load_depth: true
+
+# ---- 优化 ----
+# ★ 四卡：全局 batch = batch_size x world_size = 4，是此前 6.5cm 那一系列（2 卡）的 2 倍。
+#   代码里没有梯度累积（main_slarm.py:702），lr 在 config 里写死、不随卡数自动缩放
+#   （`if args.lr is None` 那条不触发），所以卡数变了必须自己把 lr 调回来。
+#   这里用 sqrt 缩放：5.0e-5 x sqrt(2) = 7.07e-5 -> 取 7.0e-5。
+#   Adam 系在 batch 翻倍时 sqrt 缩放比线性缩放稳，线性（1.0e-4）在跨 domain 的
+#   头几百步容易把几何先验冲掉。
+#   想要更保守就退回 2 卡的数：
+#       sed -i 's/^lr: .*/lr: 5.0e-5/;s/^stream25_trunk_lr: .*/stream25_trunk_lr: 5.0e-6/' <本文件>
+#   跑起来后核对实际卡数：grep "Global batch size" work_dirs/slarm/<exp_name>/logs/log.txt
+lr: 7.0e-5
+stream25_trunk_lr: 3.0e-6                # 25:1，与 exp0829_001 同口径：新模块要学，backbone 少动
+                                     # 让 head 去吸收外观变化，几何先验慢慢挪
+lr_sched: cosine                     # ★ 不许改。constant 跑到底会让末点 ckpt 只是
+                                     #   盆地里的一次采样（stage1 pos15 摆动 3.5x 的教训）
+min_lr: 1.0e-7
+warmup_iters: 1000
+                                     # warmup 短了正是几何先验被冲掉的时候
+batch_size: 1                        # per-GPU
+seed: 20260908
+
+load_from: work_dirs/slarm/exp0908_001_slarm_stream25_0903_2k_triview_window6_nolseg_4gpu/checkpoints/ckpt_019999.pth
+
+train_annotation: scene_list/ball_catch_triview_0903_2k_train.txt
+eval_annotation: scene_list/ball_catch_triview_0903_2k_validation.txt
+
+# ---- 步数 ----
+# 2000 场景 / (4 卡 x bs1) = 500 步一个 epoch。20000 步 = 40 epoch。
+# 对照：stage1 base 是 40k 步 x 2 卡 = 同样 80k 个样本，也是 40 epoch，
+# 那次是从零训；这次从一个已经很好的 backbone 出发，40 epoch 是够用偏宽裕的预算。
+#
+# ★ 若实际场景数不是 2000，按这个公式改，并且 cosine 会按 num_iterations 重新铺开：
+#       num_iterations = 40 x 场景数 / 4
+#   中途改 num_iterations 会让 LR 曲线跳变，要改就在开跑前改。
+num_iterations: 8000
+ckpt_every_n_iters: 1000
+vis_every_n_iters: 2000
+num_vis_samples: 2
+eval_every_n_iters: 50000            # 训练内的 evaluate 不是 acceptance 指标（frame24 那套）。
+                                     # 真正的验收跑 scripts/eval_stream25_base.py：
+                                     #   bash run_sh/eval.sh
+keep_n_ckpts: 8
+project: slarm
+exp_name: exp0908_003_slarm_stream25_0903_2k_balltoken_intrunk_landing

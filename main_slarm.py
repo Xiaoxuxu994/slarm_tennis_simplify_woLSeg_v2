@@ -275,6 +275,13 @@ def get_args_parser():
                              "so it goes through every attention layer and can shape the "
                              "backbone. Do not enable together with --use_ball_token.")
     parser.add_argument("--stream25_ball_pos_weight", type=float, default=1.0)
+    # 轨迹一致性：让 (pos15, v15) 这 6 个自由度去解释 batch 里全部 13 帧的位置标注
+    # （context 6 + target 7，标注已在显存里，此前被 `[:, -1]` 丢掉 12/13）。
+    # 结构上等价于对这 6 个自由度做最小二乘拟合。默认 0 = 关闭。
+    parser.add_argument("--stream25_ball_traj_weight", type=float, default=0.0)
+    # 落点：把残差放到 stream25_catch_frame 那一帧，杠杆臂最长。真值解析外推，
+    # 不需要标注里有那一帧。默认 0 = 关闭；没配 catch frame 时也不生效。
+    parser.add_argument("--stream25_landing_weight", type=float, default=0.0)
     parser.add_argument("--stream25_ball_vel_weight", type=float, default=1.0)
     # MS3 physical normalization scales (spec 6.2) and the terminal dynamic split (spec 5.2).
     parser.add_argument("--stream25_ms3_velocity_scale", type=float, default=5.0)

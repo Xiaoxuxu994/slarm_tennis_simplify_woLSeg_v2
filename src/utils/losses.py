@@ -888,6 +888,7 @@ def compute_loss(output_dict, input_dict, target_dict, args=None, lpips_loss=Non
     if getattr(args, "stream25_reconstruction_loss", False):
         from .stream25_losses import (
             compute_stream25_loss,
+            stream25_catch_dt_from_args,
             stream25_ms3_scales_from_args,
             stream25_weights_from_args,
         )
@@ -914,6 +915,9 @@ def compute_loss(output_dict, input_dict, target_dict, args=None, lpips_loss=Non
             ball_depth_tail_weight=getattr(
                 args, "stream25_ball_depth_tail_weight", 0.50
             ),
+            # 接球帧 -> 相对 frame 15 的秒数。config 没配 stream25_catch_frame 时
+            # 是 None，落点损失自动不参与（权重再大也不生效）。
+            catch_dt=stream25_catch_dt_from_args(args),
         )
     gs_params, pred_dict = output_dict["gs_params"], output_dict["render_results"]
     device = pred_dict[pred_dict["rgb_key"]].device

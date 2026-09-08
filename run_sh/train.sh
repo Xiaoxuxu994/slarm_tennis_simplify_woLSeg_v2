@@ -68,6 +68,21 @@ RESUME=0
 # 是同一个错误换个轴写了两遍（那一帧球在离地 3.77 m，相机 rig 才 1.5 m 高）。
 # CONFIG="configs/exp0908_001_slarm_stream25_0903_2k_triview_window6_nolseg_4gpu.yml"
 #
+# ── ball token 重启（9/08，起点是上面那组的终点 ckpt_019999）──
+# 下游要一个可靠的球状态向量，所以走 in-trunk（外挂版是 post-hoc probe，
+# 改变不了 backbone 算什么，slarm.py:1641）。
+#
+# 诊断：ball_vel 的归一化尺度 vel_scale = pos_scale / dt 里 dt 取 0.3 s
+# （frame 15 -> 24），而目标在接球帧 frame 45，dt = 1.0 s —— 速度被降权 3.33 倍。
+# 实测 v15 误差 0.4116 m/s x 1.005 s = 41.4 cm vs frame45 中位 43.9 cm，
+# 速度单独解释 94%。
+#
+# ★ 必须按顺序跑，两组只差三个键（seed 相同）：
+#   A 组先跑 —— 一行常数修同一个问题，不动代码。它若打平 B，那两个损失项不该留。
+# CONFIG="configs/exp0908_002_slarm_stream25_0903_2k_balltoken_intrunk_velscale.yml"
+#   B 组：轨迹一致性(0.5) + 落点(1.0)。开跑前先 pytest tests/utils/test_ball_trajectory_losses.py
+# CONFIG="configs/exp0908_003_slarm_stream25_0903_2k_balltoken_intrunk_landing.yml"
+#
 # ── 视图数消融（9/02，6.5cm 数据）──
 # 两份 config 逐键相同，只差 num_max_cameras 2 vs 3。必须成对跑：
 # 拿双视图去比 ckpt_005999 本身是错的（那个差里混了"多训 8k 步"这个变量）。
