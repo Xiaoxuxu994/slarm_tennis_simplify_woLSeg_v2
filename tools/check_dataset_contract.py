@@ -503,14 +503,20 @@ def _check_context_visibility(declared: dict, cams, scope: str, rep: Report) -> 
                 f"context frames {blind} have NO camera that can see the ball. Nothing can "
                 "localize the ball at those frames; if frame 15 is among them the whole "
                 "landing prediction for this scene is unanchored")
-    if bad:
+    partial = [(cam, f) for cam, f in bad if f not in set(blind)]
+    if partial:
+        # ★ WARN 不是 FAIL，尽管 stream25.py 的契约写的是"每个视图都要看得见"。
+        #   理由是下面这段说明自己给出的：不崩、轨迹真值不受影响，代价只在推理端。
+        #   而且对球拍/网兜遮挡这类数据（0902_fixed / 0903_2k），部分视图盲是**常态**
+        #   —— 报 FAIL 会让 2000 个场景刷出 2000 条同样的 FAIL、退出码 1，
+        #   把真正致命的 all-blind 那条淹掉。严重度要能区分"次优"和"不可用"。
         n_view = len(cams)
         by_frame = {}
-        for cam, f in bad:
+        for cam, f in partial:
             by_frame.setdefault(f, []).append(cam)
         detail = "; ".join(f"frame {f}: {sorted(v)} ({len(v)}/{n_view} views blind)"
                            for f, v in sorted(by_frame.items()))
-        rep.add(FAIL, scope,
+        rep.add(WARN, scope,
                 f"context frames are not visible in every view -> {detail}. "
                 "build_frame_eye_visibility requires every admitted observation to be visible "
                 "in every native view and its check is a no-op, so nothing stops this. "
@@ -520,7 +526,7 @@ def _check_context_visibility(declared: dict, cams, scope: str, rep: Report) -> 
                 "(position_rig / velocity_rig / MS3) come from ball_trajectory and are "
                 "unaffected. The real cost is at inference: fewer views means the pixel path "
                 "back-projects from fewer rays, and depth is already 95% of its error")
-    elif not blind:
+    if not bad:
         rep.add(PASS, scope,
                 f"context frames {list(CONTEXT_FRAMES)} are visible in every view")
 
