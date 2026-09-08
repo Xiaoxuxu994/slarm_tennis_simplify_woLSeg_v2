@@ -1,0 +1,187 @@
+# 0903_2k 数据 · 房间场景 GS 渲染 · 三视图 · 四卡微调
+#
+# 起点：exp0827_003 退火终点 ckpt_005999（frame24 0.026 / 0.070，目前最好的 backbone）。
+# 该 ckpt 训在仿真器的纯色背景上；本批是把同一套仿真轨迹渲进真实房间 GS 场景，
+# 外观分布整体换掉，几何约定不变。下面每一条参数都按"外观要重学、几何要保住"来定。
+#
+# ═══════════════════════════════════════════════════════════════
+# ★ 开跑前四步，缺一不可（裸数据树没有 scene_list，dataloader 第一行就会失败）
+#
+#   ① 建 scene_list —— 先不带 --write 看一眼划分，再写
+#        python tools/make_scene_list.py --data-root data/slarm_data \
+#            --dataset ball_catch_triview_0903_2k --val-count 100
+#        python tools/make_scene_list.py --data-root data/slarm_data \
+#            --dataset ball_catch_triview_0903_2k --val-count 100 --write
+#      val-count 取 100：0902_fixed 那次只有 5 个验证场景，任何指标都是噪声，
+#      连"比基线好还是坏"都判不了。100 个场景下 frame24 median 的标准误约 1/10 个
+#      场景间标准差，才够拿来和 0.026 那条基线比。
+#
+#   ② 数据集已在仓库里注册（constants.py 两处），拉一下代码即可，不需要再跑
+#      register_dataset.py --write。核对一句话：
+#        python -c "from src.dataset.constants import DATASET_DICT as D; \
+#                   print(D['ball_catch_triview_0903_2k']['size'])"      # -> [320, 240]
+#
+#   ③ 契约自检（★ 不要加 --no-images：语义图与声明的一致性只有带图才查）
+#        python tools/check_dataset_contract.py --data-root data/slarm_data \
+#            --annotation scene_list/ball_catch_triview_0903_2k_train.txt --limit 20
+#        python tools/check_dataset_contract.py --data-root data/slarm_data \
+#            --annotation scene_list/ball_catch_triview_0903_2k_train.txt \
+#            --visibility-summary --limit 0
+#      要盯的是 visibility-summary：0902_fixed 有 39/50 个场景在 frame 15
+#      （外推锚点）只剩两目。这批若比例相近，属预期；若出现"某 context 帧三视图全盲"
+#      的场景，那些场景的 frame24 是纯噪声，先剔掉再训。
+#
+#   ④ 模型初始化自检（missing 应为空、unexpected 应为 0）
+#        python tools/check_model_init.py --config configs/exp0908_001_slarm_stream25_0903_2k_triview_window6_nolseg_4gpu.yml
+#
+#   ⑤ 强烈建议：先在 ckpt_005999 上做一次 zero-shot 评测，把 domain gap 的起点量出来。
+#      不做这一步，训完不知道涨了多少，也不知道该不该继续加数据。
+#        bash run_sh/eval.sh   # 或
+#        python scripts/eval_stream25_base.py --config <本文件> \
+#            --checkpoint work_dirs/slarm/exp0827_003_*/checkpoints/ckpt_005999.pth
+# ═══════════════════════════════════════════════════════════════
+#
+# ── 已核对的数据事实（本批 scene_7000 标注，逐项算过）────────────
+#
+#   内参方形：fx_px = 0.6765179 x W(240) = 162.3643
+#             fy_px = 0.5073884 x H(320) = 162.3643      -> input_size 必须是 [320, 240]
+#   解析弹道：速度一阶差分 a_z = -9.809990 m/s^2，x 严格匀速。
+#             rig_to_world 是纯平移（z +1），rig 系是惯性系，物理外推成立。
+#   深度是 z-buffer 不是 alpha 加权：0902_fixed 上实测球面深度相对球心的偏置
+#             中位数 -0.0210 m，与"圆盘平均的前表面偏置" -(2/3)r = -0.0217 m
+#             只差 0.07 mm。所以 depth_relative_weight 维持 1.00，不降。
+#             （这是当初留在 0902 config 抬头的那个待定项，现已判定。）
+#   接球在 frame 45，不是 30 —— 见下面 stream25_catch_frame。
+#
+# ── domain gap 的具体形状 ───────────────────────────────────────
+#
+#   变的是：背景纹理、光照、材质、GS 渲染特有的高频伪影 -> RGB / LPIPS / opacity 首当其冲。
+#   没变的是：相机装配、内参、球的物理、rig 坐标约定 -> depth / MS3 的先验基本可迁移。
+#
+#   所以这次不动损失权重，只动学习率结构：trunk 压到 head 的 1/10，让外观相关的
+#   head 快速适配，而承载几何的 backbone 慢慢挪。这与 exp0901_001（同为跨 domain）
+#   的做法一致，区别只有卡数带来的 LR 缩放。
+
+model: slarm
+dataset: [ball_catch_triview_0903_2k]   # ★ 必须与标注 JSON 的 "dataset" 字段逐字一致
+data_root: data/slarm_data              # 图像在 <root>/datasets/<dataset>/...（datasets.py:283）
+
+input_size: [320, 240]                  # (H, W)，不是 (W, H)。写反内参会互换且不报错
+patch_size: 8
+embed_dim: 768
+depth: 12
+patch_embed: conv
+num_max_cameras: 3
+num_context_timesteps: 6
+num_target_timesteps: 7
+context_stride: 3
+timespan: 0.8                           # ③ 的重力自洽检查会验证这个数
+mode: window_6
+
+# ---- 接球帧：外推有效性的边界 ----
+# 标注里有两个字段都指向 frame 30，都不能用：
+#     first_contact_frame = 30      -> 用 frame 15（而非出手帧）做对称回落算的
+#     catch_plane_x_rig   = -0.4200 -> 解出来正好 frame 29.0000
+# 后者看着像独立佐证，其实是同一个错误换个轴写了一遍。判据是高度：
+#     顶点              frame 22.58
+#     回到 frame15 高度  frame 30.15   离地 3.766 m   <- 两个字段都指这里，物理上不成立
+#                                                       （相机 rig 才 1.5 m 高）
+#     回到出手高度       frame 45.15   离地 1.213 m   <- 实际接球点
+# 差值恰好 15 = 上下文窗口末帧 STREAM25_CONTEXT_FRAMES[-1]。
+stream25_catch_frame: 45
+
+use_affine_token: true
+use_sky_token: true
+use_ms3_motion: true
+use_last_token: true
+shortcut_rgb: true
+add_patch_plucker_embed: true
+sigmoid_rgb: true
+num_motion_tokens: 0
+
+strict_data_loading: true
+enable_task_semantic_head: true
+terminal_context_extrapolation: true
+stream25_render_target_chunk_size: 7
+stream25_reconstruction_loss: true
+
+# ---- 不开 ball token ----
+# 三种 ball token 配置在 6.5cm 上都输给像素法。换 domain 的第一次全量训练不该
+# 同时引入未证实的模块，否则涨跌归因不了。先把这批数据的基线立住。
+use_ball_token: false
+use_ball_token_intrunk: false
+
+# ---- 损失权重：与 exp0901_001 / exp0903_001 逐键相同 ----
+# 一个都不改是有意的：这次唯一要回答的问题是"换了外观 domain，同一套配方能到哪"。
+stream25_rgb_weight: 1.00
+stream25_lpips_weight: 0.05
+stream25_ball_rgb_weight: 0.50
+stream25_depth_relative_weight: 1.00    # z-buffer 已判定，不降（见抬头）
+stream25_ball_depth_metric_weight: 0.5
+stream25_semantic_weight: 1.00
+stream25_ms3_ball_weight: 1.00
+stream25_ms3_static_weight: 0.25
+stream25_opacity_weight: 0.10
+
+stream25_ms3_velocity_scale: 5.0
+stream25_ms3_acceleration_scale: 9.81
+stream25_ms3_jerk_scale: 1.0
+terminal_dynamic_velocity_threshold: 1.0
+stream25_semantic_class_weight_cap: 10.0
+
+# ---- 无 LSeg ----
+online_feat: false
+enable_feat_loss: false
+feat_loss_coeff: 0.0
+stream25_lseg_feature_weight: 0.0
+enable_depth_loss: true
+enable_sky_opacity_loss: true
+enable_perceptual_loss: true
+perceptual_weight: 0.05
+perceptual_loss_start_iter: 0
+load_depth: true
+
+# ---- 优化 ----
+# ★ 四卡：全局 batch = batch_size x world_size = 4，是此前 6.5cm 那一系列（2 卡）的 2 倍。
+#   代码里没有梯度累积（main_slarm.py:702），lr 在 config 里写死、不随卡数自动缩放
+#   （`if args.lr is None` 那条不触发），所以卡数变了必须自己把 lr 调回来。
+#   这里用 sqrt 缩放：5.0e-5 x sqrt(2) = 7.07e-5 -> 取 7.0e-5。
+#   Adam 系在 batch 翻倍时 sqrt 缩放比线性缩放稳，线性（1.0e-4）在跨 domain 的
+#   头几百步容易把几何先验冲掉。
+#   想要更保守就退回 2 卡的数：
+#       sed -i 's/^lr: .*/lr: 5.0e-5/;s/^stream25_trunk_lr: .*/stream25_trunk_lr: 5.0e-6/' <本文件>
+#   跑起来后核对实际卡数：grep "Global batch size" work_dirs/slarm/<exp_name>/logs/log.txt
+lr: 7.0e-5
+stream25_trunk_lr: 7.0e-6            # 10:1。跨 domain 时把 backbone 压狠一点，
+                                     # 让 head 去吸收外观变化，几何先验慢慢挪
+lr_sched: cosine                     # ★ 不许改。constant 跑到底会让末点 ckpt 只是
+                                     #   盆地里的一次采样（stage1 pos15 摆动 3.5x 的教训）
+min_lr: 1.0e-7
+warmup_iters: 1000                   # 5% 预算。跨 domain 的头几百步梯度最大，
+                                     # warmup 短了正是几何先验被冲掉的时候
+batch_size: 1                        # per-GPU
+seed: 20260908
+
+load_from: work_dirs/slarm/exp0827_003_slarm_stream25_6.5cm_triview_window6_nolseg_anneal/checkpoints/ckpt_005999.pth
+
+train_annotation: scene_list/ball_catch_triview_0903_2k_train.txt
+eval_annotation: scene_list/ball_catch_triview_0903_2k_validation.txt
+
+# ---- 步数 ----
+# 2000 场景 / (4 卡 x bs1) = 500 步一个 epoch。20000 步 = 40 epoch。
+# 对照：stage1 base 是 40k 步 x 2 卡 = 同样 80k 个样本，也是 40 epoch，
+# 那次是从零训；这次从一个已经很好的 backbone 出发，40 epoch 是够用偏宽裕的预算。
+#
+# ★ 若实际场景数不是 2000，按这个公式改，并且 cosine 会按 num_iterations 重新铺开：
+#       num_iterations = 40 x 场景数 / 4
+#   中途改 num_iterations 会让 LR 曲线跳变，要改就在开跑前改。
+num_iterations: 20000
+ckpt_every_n_iters: 2000
+vis_every_n_iters: 1000              # 跨 domain 前几千步要盯着看渲染塌没塌，比平时勤
+num_vis_samples: 2
+eval_every_n_iters: 50000            # 训练内的 evaluate 不是 acceptance 指标（frame24 那套）。
+                                     # 真正的验收跑 scripts/eval_stream25_base.py：
+                                     #   bash run_sh/eval.sh
+keep_n_ckpts: 10
+project: slarm
+exp_name: exp0908_001_slarm_stream25_0903_2k_triview_window6_nolseg_4gpu

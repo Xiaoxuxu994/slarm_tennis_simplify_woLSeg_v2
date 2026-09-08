@@ -15,8 +15,13 @@ set -euo pipefail
 #   全部是 2 卡跑的，互相可比。改成别的卡数，跟这些的横比就不成立了。
 #   核实某次实验实际用了几张：
 #       grep "Global batch size" work_dirs/slarm/<exp_name>/logs/log.txt
-GPUS="0,1"
-CONFIG="configs/exp0814_slarm_stream25_24cm_triview_window6_reproduce.yaml"
+GPUS="0,1,2,3"
+CONFIG="configs/exp0908_001_slarm_stream25_0903_2k_triview_window6_nolseg_4gpu.yml"
+# ^ 0903_2k 全量微调（9/08）。四卡 = 全局 batch 4，是 6.5cm 那一系列（2 卡）的 2 倍，
+#   config 里的 lr 已按 sqrt(2) 缩放过（5.0e-5 -> 7.0e-5）。换卡数就要连 lr 一起换。
+#   ★ 开跑前五步全在 config 抬头：make_scene_list（--val-count 100）-> 核对注册
+#     -> check_dataset_contract（含 --visibility-summary）-> check_model_init
+#     -> ckpt_005999 上的 zero-shot 评测（不做这步，训完不知道涨了多少）。
 # CONFIG="configs/slarm_stream25_24cm_triview_window6.yaml"
 
 # 断点续训：改成 1，其他什么都不用动（CONFIG/GPUS 保持和中断那次一致即可）。
@@ -52,6 +57,16 @@ RESUME=0
 #   不建的话 dataloader 第一行就失败。
 # ★ load_from 里填的是退火终点 ckpt_005999，若你指的是别的 ckpt 先改掉。
 # CONFIG="configs/exp0903_001_slarm_stream25_0902fixed_triview_window6_nolseg_smoke.yml"
+#
+# ── 0903_2k 全量微调（9/08，房间场景 GS 渲染，2k 量级，四卡）──
+# 0902_fixed 冒烟那批的全量版本，同一套渲染管线。冒烟阶段留下的待定项已判定：
+#   深度是干净的 z-buffer（球面偏置实测 -0.0210 m vs 前表面理论 -(2/3)r = -0.0217 m），
+#   所以 stream25_depth_relative_weight 维持 1.00，不用降到 0.50。
+# lower_front 从 frame 16 起被接球网兜挡住 —— 真机构如此，不是数据缺陷，别让数据侧
+# 把网删掉去"修"它；后果是外推锚点 frame 15 之后只剩纯水平基线。
+# 接球帧 45，标注里的 first_contact_frame=30 和新增的 catch_plane_x_rig 都指向 frame 29-30，
+# 是同一个错误换个轴写了两遍（那一帧球在离地 3.77 m，相机 rig 才 1.5 m 高）。
+# CONFIG="configs/exp0908_001_slarm_stream25_0903_2k_triview_window6_nolseg_4gpu.yml"
 #
 # ── 视图数消融（9/02，6.5cm 数据）──
 # 两份 config 逐键相同，只差 num_max_cameras 2 vs 3。必须成对跑：
