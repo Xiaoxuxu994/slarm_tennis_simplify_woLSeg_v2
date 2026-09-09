@@ -28,6 +28,9 @@ import sys
 import time
 import argparse
 import itertools
+import json
+import math
+from pathlib import Path
 
 import torch
 
@@ -42,6 +45,7 @@ from tools.stream25_runtime import (
     slice_stream_observation,
 )
 from src.models.stream_session import StreamSession
+from tools.ball_fusion_report import build_fusion_report, print_fusion_report
 from src.utils.stream25_metrics import (
     transform_position,
     transform_vector,
@@ -269,7 +273,30 @@ def main():
                     help="球半径（米）。默认读 config 的 stream25_ball_radius（0.0325）")
     ap.add_argument("--ball-mask-source", choices=["pred", "gt", "both"], default="both",
                     help="球区域来源：pred(预测语义==1) / gt(GT ball_ms3_mask) / both(对照)")
+    ap.add_argument("--fusion-ablation", action="store_true",
+                    help="Compare per-view, mean and ray-weighted terminal states; no retraining")
+    ap.add_argument("--fusion-position-ratio", type=float, default=3.0,
+                    help="Assumed along/transverse position noise ratio, in [1,100]")
+    ap.add_argument("--fusion-velocity-ratio", type=float, default=1.0,
+                    help="Independent velocity noise ratio; default 1 = mean velocity")
+    ap.add_argument("--hit-threshold", type=float, default=0.1196,
+                    help="Strict landing error threshold in metres")
+    ap.add_argument("--fusion-output", type=Path,
+                    help="New JSON file for paired fusion results (never overwritten)")
     args_cli = ap.parse_args()
+    if args_cli.fusion_output and not args_cli.fusion_ablation:
+        ap.error("--fusion-output requires --fusion-ablation")
+    if args_cli.fusion_ablation:
+        for ratio in (args_cli.fusion_position_ratio, args_cli.fusion_velocity_ratio):
+            if not math.isfinite(ratio) or not 1 <= ratio <= 100:
+                ap.error("Fusion ratios must be finite and in [1,100]")
+        if not math.isfinite(args_cli.hit_threshold) or args_cli.hit_threshold <= 0:
+            ap.error("--hit-threshold must be finite and positive")
+        if args_cli.fusion_output:
+            if args_cli.fusion_output.exists():
+                ap.error("Fusion output already exists; choose a new path")
+            if not args_cli.fusion_output.parent.is_dir():
+                ap.error("Fusion output parent directory must exist")
 
     gravity = torch.tensor([float(x) for x in args_cli.gravity.split(",")], dtype=torch.float32)
     device = torch.device("cuda")
@@ -406,6 +433,23 @@ def main():
         print(f"\n[check] GT ball accel(rig) mean = {g_mean.tolist()}  (should be ~= gravity; use to verify --gravity)")
 
     sources = [s for s in ("pred", "gt") if per_scene and s in per_scene[0][0]]
+    if args_cli.fusion_ablation:
+        report = build_fusion_report(
+            per_scene, sources, gravity,
+            position_ratio=args_cli.fusion_position_ratio,
+            velocity_ratio=args_cli.fusion_velocity_ratio,
+            threshold=args_cli.hit_threshold,
+        )
+        report.update({"config": args_cli.config, "checkpoint": args_cli.checkpoint,
+                       "split": args_cli.split, "gravity_rig": gravity.tolist(),
+                       "ball_surface_offset_m": ball_surface_offset,
+                       "catch_frame": catch_frame, "target_frames": target_frames})
+        print_fusion_report(report)
+        if args_cli.fusion_output:
+            with args_cli.fusion_output.open("x", encoding="utf-8") as handle:
+                json.dump(report, handle, indent=2, allow_nan=False)
+                handle.write("\n")
+            print(f"Fusion results: {args_cli.fusion_output}")
 
     # ① pos15 起点误差（frame24 的"地板"：外推再准也超不过它）
     print("\n" + "=" * 72)
@@ -526,7 +570,7 @@ def main():
         print(f"{'region':8s} {'metric':16s} {'median':>10s} {'p95':>10s} {'n_valid':>8s}")
         print("-" * 72)
         for label, column in (
-            ("frame24", 0),
+            (f"frame{bt_frame}", 0),
             ("pos15_error", 1),
             ("v15_error", 2),
         ):
