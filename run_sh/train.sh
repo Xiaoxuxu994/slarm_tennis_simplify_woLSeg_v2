@@ -77,11 +77,15 @@ RESUME=0
 # 实测 v15 误差 0.4116 m/s x 1.005 s = 41.4 cm vs frame45 中位 43.9 cm，
 # 速度单独解释 94%。
 #
-# ★ 必须按顺序跑，两组只差三个键（seed 相同）：
-#   A 组先跑 —— 一行常数修同一个问题，不动代码。它若打平 B，那两个损失项不该留。
-# CONFIG="configs/exp0908_002_slarm_stream25_0903_2k_balltoken_intrunk_velscale.yml"
-#   B 组：轨迹一致性(0.5) + 落点(1.0)。开跑前先 pytest tests/utils/test_ball_trajectory_losses.py
+# ★ 2026-09-09：只跑 B 组。ckpt_019999 的实测把 ball token 的精度理由推翻了
+#   （GT 掩码与预测掩码结果几乎相同 -> 选球零成本；phys≈free -> 外推不是瓶颈；
+#    像素法 frame45 10.81 cm 已在 11.96 cm 容差内）。它现在的目的是给下游一个
+#   紧凑的球状态向量。判据：balltoken frame24 与像素法 0.052 比，
+#   ~0.052 收工 / >0.08 放弃 / <0.04 才回头跑 A 组归因。
+#   开跑前先 pytest tests/utils/test_ball_trajectory_losses.py
 # CONFIG="configs/exp0908_003_slarm_stream25_0903_2k_balltoken_intrunk_landing.yml"
+#   A 组（条件实验，默认不跑）：一行常数 stream25_ball_vel_scale: 0.1
+# CONFIG="configs/exp0908_002_slarm_stream25_0903_2k_balltoken_intrunk_velscale.yml"
 #
 # ── 视图数消融（9/02，6.5cm 数据）──
 # 两份 config 逐键相同，只差 num_max_cameras 2 vs 3。必须成对跑：
