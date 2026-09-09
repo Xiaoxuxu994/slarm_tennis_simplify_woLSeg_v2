@@ -420,7 +420,13 @@ def main():
     print("=" * 72)
 
     # ①b pos15 误差分解：沿视线(depth 期望值误差) vs 横向(球定位误差)
-    print(f"{'region':8s} {'pos15_split':14s} {'along_med':>10s} {'along_p95':>10s} {'lat_med':>10s} {'lat_p95':>10s}")
+    # ★ 把补偿口径写进表头，不要只在启动时打印一行。
+    #   两次运行的 along_med 逐位相同、却看不出哪次开了补偿 —— 那种输出没法比对。
+    #   数字必须带着它的口径一起出现。
+    _comp = (f"   [ball-centre comp: {ball_surface_offset*100:.2f} cm]"
+             if ball_surface_offset else "   [ball-centre comp: OFF -> along 含球半径偏置]")
+    print(f"{'region':8s} {'pos15_split':14s} {'along_med':>10s} {'along_p95':>10s}"
+          f" {'lat_med':>10s} {'lat_p95':>10s}{_comp}")
     print("-" * 72)
     for src in sources:
         decs = [_pos15_decompose(states[src], gp15) for (states, _g24, gp15, _gv, _dt, _bt, _tg) in per_scene]
