@@ -1,3 +1,7 @@
+# PEP 604（`str | os.PathLike`）在本文件的函数签名里用了，但 3.9 上那是 def 时求值，
+# 会 TypeError。同目录的 stream25_losses / stream25_metrics 都带这行，这里补齐。
+from __future__ import annotations
+
 import collections.abc
 import datetime
 import hashlib
