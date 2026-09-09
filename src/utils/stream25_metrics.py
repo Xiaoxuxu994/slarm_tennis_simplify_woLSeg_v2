@@ -238,6 +238,49 @@ def integrate_frame24_position_physics(
     return pos15 + v15 * dt + 0.5 * gravity_rig * dt ** 2
 
 
+# 球心 vs 球前表面：像素路径的一个系统偏置。
+#
+# 深度图是 z-buffer，记录第一个不透明面，所以把球掩码处的深度反投影得到的是球的
+# **前表面**；而 ball_trajectory 的 position_rig 是仿真器给的**球心**。两边口径
+# 不同，差值恒定朝向相机，方向恰好是误差里占 95.5% 的深度方向。
+#
+# 系数取多少取决于在球面上怎么池化：
+#     1.000  只取最近点（球心投影处那一个像素）
+#     0.707  圆盘中位数  -r/sqrt(2)
+#     0.667  圆盘平均值  -(2/3)r
+#     0.646  ★ 实测（0902_fixed，球语义掩码上取 median 的深度 vs 解析球心距离，
+#            中位数 -0.0210 m / r=0.0325 m）——与 eval 的池化口径完全一致，
+#            所以默认用它，而不是任何一个理论值。
+#     0.000  关闭（历史口径）
+# 三个理论值把实测夹在中间，说明偏置的来源是清楚的：掩码里混了球边缘的像素，
+# 那里 sqrt(r^2 - rho^2) 小，把中位数往下拉。
+BALL_SURFACE_COEFFICIENT_MEASURED = 0.646
+BALL_SURFACE_COEFFICIENT_DISC_MEAN = 2.0 / 3.0
+BALL_SURFACE_COEFFICIENT_DISC_MEDIAN = 0.5 ** 0.5
+
+
+def apply_ball_surface_offset(
+    positions: torch.Tensor,
+    directions: torch.Tensor,
+    offset_meters: float,
+) -> torch.Tensor:
+    """把反投影得到的球前表面点沿视线推到球心。
+
+    ★ ``directions`` 必须归一化后再用：embedders.py:197 的 ``dirs`` 是**未归一化**的
+      （相机系 z 分量恒为 1，配合平面 z-depth 用），``viewdirs`` 才是单位向量。
+      直接乘 ``dirs`` 会把补偿量放大 ``||dirs||`` 倍（画面角落可达 1.3 倍）。
+
+    Args:
+        positions: ``[..., 3]`` 反投影得到的表面点。
+        directions: ``[..., 3]`` 同形状的光线方向，可未归一化。
+        offset_meters: 沿视线**远离相机**推进的米数，即 ``coefficient * radius``。
+    """
+    if not offset_meters:
+        return positions
+    unit = directions / (directions.norm(dim=-1, keepdim=True) + 1e-8)
+    return positions + unit * offset_meters
+
+
 def transform_position(position: torch.Tensor, transform: torch.Tensor) -> torch.Tensor:
     """Apply a homogeneous rigid transform to one or more 3-D positions."""
     if position.shape[-1] != 3 or transform.shape[-2:] != (4, 4):

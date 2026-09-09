@@ -274,6 +274,9 @@ def get_args_parser():
                         help="ball token as an aggregator special token (like sky/affine), "
                              "so it goes through every attention layer and can shape the "
                              "backbone. Do not enable together with --use_ball_token.")
+    # 球半径（米）。只被评测侧的球心补偿用到（eval / verify 的
+    # --ball-radius-compensation），训练损失不读它。6.5cm 球 -> 0.0325；24cm 那批要改。
+    parser.add_argument("--stream25_ball_radius", type=float, default=0.0325)
     parser.add_argument("--stream25_ball_pos_weight", type=float, default=1.0)
     # 轨迹一致性：让 (pos15, v15) 这 6 个自由度去解释 batch 里全部 13 帧的位置标注
     # （context 6 + target 7，标注已在显存里，此前被 `[:, -1]` 丢掉 12/13）。

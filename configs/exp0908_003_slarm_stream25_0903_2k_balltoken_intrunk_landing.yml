@@ -69,6 +69,8 @@ mode: window_6
 #     回到出手高度       frame 45.15   离地 1.213 m   <- 实际接球点
 # 差值恰好 15 = 上下文窗口末帧 STREAM25_CONTEXT_FRAMES[-1]。
 stream25_catch_frame: 45
+stream25_ball_radius: 0.0325            # 球半径（米）。只被评测侧的球心补偿用到
+                                       # （eval/verify 的 --ball-radius-compensation），训练损失不读
 
 use_affine_token: true
 use_sky_token: true

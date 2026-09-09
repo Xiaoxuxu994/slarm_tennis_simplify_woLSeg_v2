@@ -42,7 +42,13 @@ from tools.stream25_runtime import (
     slice_stream_observation,
 )
 from src.models.stream_session import StreamSession
-from src.utils.stream25_metrics import transform_position, transform_vector, finite_percentile
+from src.utils.stream25_metrics import (
+    transform_position,
+    transform_vector,
+    finite_percentile,
+    apply_ball_surface_offset,
+    BALL_SURFACE_COEFFICIENT_MEASURED,
+)
 
 
 def _run_scene(model, prepared, device, dtype):
@@ -74,11 +80,19 @@ def _run_scene(model, prepared, device, dtype):
     }
 
 
-def _extract_ball_state(scene, canonical_to_rig, region_mask):
+def _extract_ball_state(scene, canonical_to_rig, region_mask, ball_surface_offset=0.0):
     """球区域提取，球区域来源由 region_mask 决定（pred 语义==1 或 GT ball mask）。
-    每个视图给出 rig 系下的 (pos15, v15, a15, j15)；该视图无球则 None。"""
+    每个视图给出 rig 系下的 (pos15, v15, a15, j15)；该视图无球则 None。
+
+    ball_surface_offset（米，默认 0 = 历史口径）：深度图是 z-buffer，反投影得到的是
+    球**前表面**，而真值是球**心**，两者恒差一个朝向相机的量。非零时沿视线把它补回去。
+    这个偏置正好在深度方向，也就是 _pos15_decompose 里 "沿视线" 那一路。
+    """
     depth15, ms3_15 = scene["depth15"], scene["ms3_15"]
     positions15 = scene["ray_o15"] + scene["ray_d15"] * depth15[..., None]   # [V,H,W,3]
+    positions15 = apply_ball_surface_offset(
+        positions15, scene["ray_d15"], ball_surface_offset
+    )
     per_eye = []
     for eye in range(depth15.shape[0]):
         mask = (
@@ -243,6 +257,16 @@ def main():
                     help="逗号分隔的落点目标帧，例如 24,30,40。>24 的帧没有标注，"
                          "预测与真值都用解析弹道外推到那里 —— 只在球未被接住/落地前有效")
     ap.add_argument("--gravity", default="0,0,-9.81", help="rig 系下的重力向量，逗号分隔")
+    ap.add_argument("--ball-radius-compensation", "--ball_radius_compensation",
+                    dest="ball_radius_compensation", type=float, nargs="?",
+                    const=BALL_SURFACE_COEFFICIENT_MEASURED, default=0.0,
+                    help="把反投影的球前表面点沿视线推到球心。传系数 c，补偿量 = c x 球半径；"
+                         f"不带值则用实测的 {BALL_SURFACE_COEFFICIENT_MEASURED}。"
+                         "默认 0 = 关闭（历史口径）。开了之后 pos15 的 along 分量会明显下降，"
+                         "那正是这个偏置所在的方向。")
+    ap.add_argument("--ball-radius", "--ball_radius", dest="ball_radius",
+                    type=float, default=None,
+                    help="球半径（米）。默认读 config 的 stream25_ball_radius（0.0325）")
     ap.add_argument("--ball-mask-source", choices=["pred", "gt", "both"], default="both",
                     help="球区域来源：pred(预测语义==1) / gt(GT ball_ms3_mask) / both(对照)")
     args_cli = ap.parse_args()
@@ -253,6 +277,23 @@ def main():
 
     args = load_stream25_args(args_cli.config, checkpoint_path=args_cli.checkpoint,
                               checkpoint_role="evaluation")
+
+    # 球半径补偿。★ 必须在 args 解析出来之后 —— 这里读的是 config。
+    #   （同一个位置踩过一次 UnboundLocalError，见 commit 0bd7515。）
+    ball_radius = args_cli.ball_radius
+    if ball_radius is None:
+        ball_radius = float(getattr(args, "stream25_ball_radius", 0.0325) or 0.0325)
+    ball_surface_offset = float(args_cli.ball_radius_compensation) * float(ball_radius)
+    if ball_surface_offset:
+        print(f"[verify] ball-surface compensation ON: "
+              f"{args_cli.ball_radius_compensation:.3f} x {ball_radius:.4f} m "
+              f"= {ball_surface_offset * 100:.2f} cm along the view ray "
+              f"(front surface -> centre). Not comparable to runs without it.",
+              flush=True)
+    else:
+        print("[verify] ball-surface compensation off: pos15 is the ball FRONT SURFACE, "
+              "GT is the CENTRE, so a constant bias sits in the 'along' component.",
+              flush=True)
 
     # 接球帧：命令行 > config > 未知。它同时是「外推到哪还算数」的物理边界。
     catch_frame = args_cli.catch_frame
@@ -324,7 +365,8 @@ def main():
         if args_cli.ball_mask_source in ("gt", "both"):
             regions["gt"] = prepared["ball_ms3_mask"][0].bool().cpu()[15]
         scene_states = {
-            src: _extract_ball_state(scene, canonical_to_rig, region)
+            src: _extract_ball_state(scene, canonical_to_rig, region,
+                                     ball_surface_offset=ball_surface_offset)
             for src, region in regions.items()
         }
         # GT 球速度/加速度(rig)：从 GT dense_ms3 球区域 median 取；速度→v15 误差，加速度→核对重力

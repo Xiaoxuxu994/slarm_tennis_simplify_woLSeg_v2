@@ -42,6 +42,8 @@ from src.utils.stream25_metrics import (
     finite_percentile,
     integrate_frame24_position,
     integrate_frame24_position_physics,
+    apply_ball_surface_offset,
+    BALL_SURFACE_COEFFICIENT_MEASURED,
     transform_position,
     transform_vector,
 )
@@ -268,9 +270,19 @@ def compute_rendered_frame24_position_errors(
     gt_pos24: torch.Tensor,
     *,
     dt: float,
+    ball_surface_offset: float = 0.0,
 ) -> List[float]:
-    """Return one rendered frame-24 position error per named view."""
+    """Return one rendered frame-24 position error per named view.
+
+    ``ball_surface_offset`` 单位米，默认 0 = 历史口径。非零时把反投影得到的球
+    **前表面**点沿视线推到球**心**，消掉那个恒定偏置（见
+    stream25_metrics.apply_ball_surface_offset）。它会改变 frame24_position 的
+    定义，所以必须显式打开，不能默认生效 —— 否则和历史数字不可比。
+    """
     positions15 = ray_origins15 + ray_directions15 * depth15[..., None]
+    positions15 = apply_ball_surface_offset(
+        positions15, ray_directions15, ball_surface_offset
+    )
     errors = []
     for eye in range(depth15.shape[0]):
         mask = (
@@ -311,6 +323,7 @@ def compute_rendered_frame24_position_error(
     gt_pos24: torch.Tensor,
     *,
     dt: float,
+    ball_surface_offset: float = 0.0,
 ) -> float:
     """Return the conservative worst finite named-view frame-24 error."""
     errors = compute_rendered_frame24_position_errors(
@@ -322,6 +335,7 @@ def compute_rendered_frame24_position_error(
         canonical_to_rig,
         gt_pos24,
         dt=dt,
+        ball_surface_offset=ball_surface_offset,
     )
     finite = [value for value in errors if math.isfinite(value)]
     return max(finite) if finite else float("nan")
@@ -423,6 +437,8 @@ def evaluate_scene(
     data_dict,
     device,
     timespan: float = 0.8,
+    *,
+    ball_surface_offset: float = 0.0,
 ) -> Dict[str, Any]:
     """Evaluate one scene through a fresh StreamSession and return per-bucket metrics."""
     from src.models.stream_session import StreamSession
@@ -445,6 +461,7 @@ def evaluate_scene(
         timespan,
         target_ray_origins=target_rays["origins"],
         target_ray_directions=target_rays["dirs"],
+        ball_surface_offset=ball_surface_offset,
     )
     return metrics
 
@@ -573,6 +590,7 @@ def compute_stream25_scene_metrics(
     *,
     target_ray_origins: torch.Tensor,
     target_ray_directions: torch.Tensor,
+    ball_surface_offset: float = 0.0,
 ) -> Dict[str, Any]:
     render = predictions["render_results"]
     pred_rgb = render["rendered_image"][0].float().cpu()
@@ -705,6 +723,7 @@ def compute_stream25_scene_metrics(
         canonical_to_rig,
         gt_pos24,
         dt=dt,
+        ball_surface_offset=ball_surface_offset,
     )
 
     # 并列的 ball token 落点（仅当模型带内建 ball token 时存在）。
@@ -879,6 +898,8 @@ def run_evaluation(
     reference: bool = False,
     render_chunk: Optional[int] = None,
     num_workers: int = 8,
+    ball_radius_compensation: float = 0.0,
+    ball_radius: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Run full evaluation on a split. For final-test, require a selection report."""
     if split == "final-test":
@@ -951,6 +972,21 @@ def run_evaluation(
     camera_order = set_camera_order(
         camera_names_from_arguments(args, role="evaluation")
     )
+
+    # 球半径补偿：把反投影得到的球**前表面**点推到球**心**，消掉一个恒定偏置。
+    # 默认 0 = 历史口径，frame24_position 与此前所有实验可比。
+    # 半径从 config 读（--ball-radius 可覆盖），不写死 —— 24cm 那批球径不同。
+    if ball_radius is None:
+        ball_radius = float(getattr(args, "stream25_ball_radius", 0.0325) or 0.0325)
+    ball_surface_offset = float(ball_radius_compensation) * float(ball_radius)
+    if ball_surface_offset:
+        print(
+            f"[eval] ball-surface compensation ON: "
+            f"{ball_radius_compensation:.3f} x {ball_radius:.4f} m "
+            f"= {ball_surface_offset*100:.2f} cm along the view ray. "
+            f"frame24_position is NOT comparable to runs without it.",
+            flush=True,
+        )
     print(
         f"[eval] named views ({len(camera_order)}): {', '.join(camera_order)}",
         flush=True,
@@ -992,7 +1028,10 @@ def run_evaluation(
             input_dict, target_dict = collate_and_prepare(sample, args, torch_device)
             prepared = dict(input_dict)
             prepared.update(target_dict)
-            scene_result = evaluate_scene(model, prepared, torch_device, args.timespan)
+            scene_result = evaluate_scene(
+                model, prepared, torch_device, args.timespan,
+                ball_surface_offset=ball_surface_offset,
+            )
             scene_result["scene_index"] = index
             scene_result["scene_name"] = input_dict.get("scene_name", [str(index)])[0]
             scene_results.append(_compact_scene_result(scene_result))
@@ -1067,7 +1106,11 @@ def _finalize_and_write(
         "ball_visibility_counts": ball_visibility_counts,
         "frame24_position_method": (
             "rendered_depth_ms3_predicted_semantic_frame15"
+            + ("_ball_center_compensated" if ball_surface_offset else "")
         ),
+        "ball_surface_offset_m": ball_surface_offset,
+        "ball_radius_m": ball_radius,
+        "ball_radius_compensation": ball_radius_compensation,
         "metrics": metrics,
         "valid_counts": valid_counts,
         "scope_reports": scope_reports,
@@ -1100,6 +1143,11 @@ def _finalize_and_write(
             f"- Scenes: **{result['scene_count']}**",
             f"- Considered frame-eyes: **{result['considered_frame_eyes']}**",
             f"- Overall: **{result['overall']}**",
+            (f"- Ball-surface compensation: **{result['ball_surface_offset_m']*100:.2f} cm**"
+             f"（{result['ball_radius_compensation']:.3f} x r={result['ball_radius_m']:.4f} m）"
+             "　★ frame24_position 与未开此项的历史数字不可比"
+             if result["ball_surface_offset_m"] else
+             "- Ball-surface compensation: off（历史口径，frame24_position 测的是球前表面 vs 球心）"),
             "",
             "## 关键指标（aggregate）",
             "",
@@ -1135,6 +1183,17 @@ if __name__ == "__main__":
                         help="覆盖 render_target_chunk_size（config 默认 1 = 逐帧渲染）；可选加速渲染")
     parser.add_argument("--num-workers", type=int, default=8,
                         help="DataLoader 数据加载并行 worker 数（本地盘建议 8；0=主进程串行，退回原行为）")
+    parser.add_argument("--ball-radius-compensation", "--ball_radius_compensation",
+                        dest="ball_radius_compensation", type=float, nargs="?",
+                        const=BALL_SURFACE_COEFFICIENT_MEASURED, default=0.0,
+                        help="把反投影的球前表面点沿视线推到球心，消掉一个恒定偏置。"
+                             "传系数 c，补偿量 = c x 球半径；不带值则用实测的 "
+                             f"{BALL_SURFACE_COEFFICIENT_MEASURED}（球语义掩码 median 池化下测得，"
+                             "与本脚本口径一致）。理论参考：圆盘均值 0.667 / 圆盘中位 0.707 / "
+                             "最近点 1.0。默认 0 = 关闭，与历史数字可比。")
+    parser.add_argument("--ball-radius", "--ball_radius", dest="ball_radius",
+                        type=float, default=None,
+                        help="球半径（米）。默认读 config 的 stream25_ball_radius（0.0325）")
     args = parser.parse_args()
 
     sel = None
@@ -1147,5 +1206,7 @@ if __name__ == "__main__":
         selection_report=sel, output_json=args.output,
         output_markdown=args.output_markdown, reference=args.reference,
         render_chunk=args.render_chunk, num_workers=args.num_workers,
+        ball_radius_compensation=args.ball_radius_compensation,
+        ball_radius=args.ball_radius,
     )
     print(json.dumps(result, indent=2))
