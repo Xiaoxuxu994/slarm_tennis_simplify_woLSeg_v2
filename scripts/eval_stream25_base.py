@@ -820,6 +820,53 @@ def _single_sample_collate(batch):
     return batch[0]
 
 
+def _render_failing_gates(result: Dict[str, Any]) -> List[str]:
+    """列出真正让 overall 变成 FAIL 的门。
+
+    ★ 这一节存在的理由：上面那张"关键指标"表只渲染 **aggregate**，而 overall 是在
+      ("aggregate",) + 每个具名相机 上分别判的（apply_scoped_acceptance_gates）。
+      所以完全可能出现"表格全绿 + Overall FAIL"，而报告不给任何线索 ——
+      那种输出无法据以行动。
+
+    ★ 有三种失败形态，后两种和模型质量无关，别当成训练不够：
+        FAIL                 指标越线。
+        INSUFFICIENT_SAMPLES 该 (scope, bucket) 一个有效样本都没有。被网兜挡住的
+                             lower_front 在 far/farthest 桶里没有球，就是这一种；
+                             它靠继续训练**修不好**，要么按视图豁免，要么改门。
+        NONFINITE            指标是 NaN/inf，通常是上游除零。
+    """
+    lines: List[str] = []
+    for gate_id, rec in (result.get("gates") or {}).items():
+        if rec == "NONFINITE":
+            lines.append(f"- `{gate_id}` — **NONFINITE**（指标是 NaN/inf）")
+            continue
+        if not isinstance(rec, dict) or rec.get("passed", True):
+            continue
+        status = rec.get("status", "FAIL")
+        if status == "INSUFFICIENT_SAMPLES":
+            lines.append(
+                f"- `{gate_id}` — **INSUFFICIENT_SAMPLES**"
+                f"（有效样本 {rec.get('valid_count')} < {rec.get('minimum_valid_count')}）"
+                " — 该视图在这个时间桶里看不到球，训练修不好"
+            )
+        else:
+            lines.append(
+                f"- `{gate_id}` — **{status}**: {rec.get('value'):.4f} "
+                f"vs 阈值 {rec.get('limit'):.4f}"
+            )
+    if not lines:
+        lines.append(
+            "（没有未通过的门。若 Overall 仍是 FAIL，看 `missing_gates`："
+            "ACCEPTANCE_TABLE 里有、但指标里根本没算出来的门也会判负。）"
+        )
+    missing = result.get("missing_gates") or []
+    if missing:
+        lines += ["", f"`missing_gates`（{len(missing)} 项）: " +
+                  ", ".join(f"`{m}`" for m in missing[:20]) +
+                  (" ..." if len(missing) > 20 else "")]
+    return lines
+
+
 def run_evaluation(
     config_path: str,
     checkpoint_path: str,
@@ -1057,6 +1104,10 @@ def _finalize_and_write(
             "## 关键指标（aggregate）",
             "",
             render_single_markdown(result["metrics"]),
+            "",
+            "## 未通过的门",
+            "",
+            *_render_failing_gates(result),
             "",
             "## Gate metrics (full)",
             "",
