@@ -254,6 +254,31 @@ def integrate_frame24_position_physics(
 #     0.000  关闭（历史口径）
 # 三个理论值把实测夹在中间，说明偏置的来源是清楚的：掩码里混了球边缘的像素，
 # 那里 sqrt(r^2 - rho^2) 小，把中位数往下拉。
+#
+# ★★ 2026-09-09 实测结论：默认保持关闭，中位数上没有收益。★★
+#
+# 在 0903_2k ckpt_019999 / 100 场景上开关各跑一次（verify_physics_extrapolation）：
+#
+#                    off       on     Δ      占补偿 21.0 mm
+#     pred along_med  0.0304  0.0292  -1.2mm       6%
+#     pred along_p95  0.0947  0.0803 -14.4mm      69%
+#     gt   along_med  0.0327  0.0277  -5.0mm      24%
+#     gt   along_p95  0.1135  0.0925 -21.0mm     100%
+#
+# **只有尾部像"前表面偏置"，中位数不像。** gt 的 p95 恰好改善了整个补偿量，
+# 说明最差的那些场景里预测确实落在球前表面；但中位场景的渲染深度本来就在球心
+# 附近，再推 2.1 cm 等于推过头。
+#
+# 机制（未证实）：GT 的 .tif 是干净的 z-buffer，这一点是量过的（球掩码 median
+# 深度 vs 解析球心距离 = -0.0210 m，对上 -(2/3)r = -0.0217 m）。但**模型渲染出来
+# 的深度不是 z-buffer** —— 3DGS 给的是 alpha 加权期望深度 D = sum(d_i a_i T_i)，
+# 而球只有 2.66 px、全是边缘像素，渲染值会被身后的背景往远处拉，越过球心。
+# 当初把"GT 深度图是 z-buffer"直接当成"模型渲染也是 z-buffer"，是两件事。
+#
+# 另注：开关之间 lat_med 也动了 0.6 mm，虽然补偿纯粹沿视线。原因是 _pos15_error /
+# _pos15_decompose 取的是"总误差最大的那个视图"，补偿会改变谁最差。所以毫米级的
+# 对比并不是严格受控的。
+#
 BALL_SURFACE_COEFFICIENT_MEASURED = 0.646
 BALL_SURFACE_COEFFICIENT_DISC_MEAN = 2.0 / 3.0
 BALL_SURFACE_COEFFICIENT_DISC_MEDIAN = 0.5 ** 0.5
