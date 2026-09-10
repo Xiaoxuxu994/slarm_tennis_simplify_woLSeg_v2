@@ -468,7 +468,7 @@ def main():
     #   两次运行的 along_med 逐位相同、却看不出哪次开了补偿 —— 那种输出没法比对。
     #   数字必须带着它的口径一起出现。
     _comp = (f"   [ball-centre comp: {ball_surface_offset*100:.2f} cm]"
-             if ball_surface_offset else "   [ball-centre comp: OFF -> along 含球半径偏置]")
+             if ball_surface_offset else "   [ball-centre comp: OFF -> along still carries the ball-radius bias]")
     print(f"{'region':8s} {'pos15_split':14s} {'along_med':>10s} {'along_p95':>10s}"
           f" {'lat_med':>10s} {'lat_p95':>10s}{_comp}")
     print("-" * 72)

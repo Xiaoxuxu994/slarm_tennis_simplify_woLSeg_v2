@@ -1051,6 +1051,9 @@ def run_evaluation(
         reference=reference,
         output_json=output_json,
         output_markdown=output_markdown,
+        ball_surface_offset=ball_surface_offset,
+        ball_radius=ball_radius,
+        ball_radius_compensation=ball_radius_compensation,
     )
 
 
@@ -1065,8 +1068,18 @@ def _finalize_and_write(
     reference,
     output_json,
     output_markdown,
+    ball_surface_offset=0.0,
+    ball_radius=None,
+    ball_radius_compensation=0.0,
 ):
-    """对（可能来自多个 shard 合并的）全量 scene_results 做一次完整聚合并写出。"""
+    """对（可能来自多个 shard 合并的）全量 scene_results 做一次完整聚合并写出。
+
+    ★ 球心补偿的三个值必须由调用方传进来，不能靠闭包 —— 这个函数是独立的顶层
+      函数（为了支持多 shard 合并），run_evaluation 的局部变量在这里不可见。
+      commit a325081 正是漏了这一步：函数体里引用了 ball_surface_offset，
+      于是**每一次 eval 都 NameError**，连不开补偿的也一样，因为写进 result 的
+      那两行是无条件执行的。
+    """
     from tools.stream25_runtime import sha256_file
 
     # 按 scene_index 排序，保证与单卡逐场景顺序一致、结果可复现
