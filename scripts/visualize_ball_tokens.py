@@ -75,12 +75,16 @@ def validate_checkpoint_behavior(checkpoint: dict, args: Any) -> dict:
 def collect_ball_outputs(model: Any, prepared: dict, attention_frame: int | None) -> dict:
     """Capture only six causal ball readouts; leave model parameters and patches alone."""
     import torch
+    from src.utils.frame_indices import normalize_frame_indices
 
     batch, steps, views = prepared["context_image"].shape[:3]
     if batch != 1 or steps != 6:
         raise ValueError("Visualization expects one scene and all six observations")
-    frames = prepared["context_frame_idx"].reshape(batch, steps, views)
-    expected = torch.arange(6, device=frames.device)[None, :, None] * 3
+    frames = normalize_frame_indices(
+        prepared["context_frame_idx"], batch_size=batch, num_timesteps=steps,
+        num_views=views, name="context_frame_idx",
+    )
+    expected = torch.arange(6, device=frames.device)[None, :] * 3
     if not torch.equal(frames, expected.expand_as(frames)):
         raise ValueError("Observations must be exactly frame0/3/6/9/12/15 for every view")
     captured: dict[str, Any] = {}
@@ -138,16 +142,23 @@ def make_scene_data(captured: dict, prepared: dict, target: dict, *, args: Any,
                     scene_index: int, view_names: list[str], attention_frame: int) -> dict:
     import numpy as np
     from src.dataset.stream25 import MS3_GRAVITY_RIG
+    from src.utils.frame_indices import normalize_frame_indices
 
     def array(value):
         return value.detach().float().cpu().numpy()
 
-    steps, views = prepared["context_image"].shape[1:3]
-    frames = array(prepared["context_frame_idx"]).reshape(steps, views)[:, 0].astype(np.int64)
-    gt_frames_all = array(target["target_frame_idx"]).reshape(-1, views)
-    if not np.all(gt_frames_all == gt_frames_all[:, :1]):
-        raise ValueError("Target frame indices must be synchronized across views")
-    gt_frames = gt_frames_all[:, 0].astype(np.int64)
+    batch, steps, views = prepared["context_image"].shape[:3]
+    if batch != 1:
+        raise ValueError("Visualization expects one scene")
+    frames = normalize_frame_indices(
+        prepared["context_frame_idx"], batch_size=batch, num_timesteps=steps,
+        num_views=views, name="context_frame_idx",
+    )[0].cpu().numpy()
+    gt_frames = normalize_frame_indices(
+        target["target_frame_idx"], batch_size=batch,
+        num_timesteps=target["ball_position_rig"].shape[1],
+        num_views=views, name="target_frame_idx",
+    )[0].cpu().numpy()
     if not np.array_equal(gt_frames, np.arange(25)):
         raise ValueError("Visualization requires all recorded target frames 0..24")
     fps = float(np.asarray(array(prepared["fps"])).reshape(-1)[0])

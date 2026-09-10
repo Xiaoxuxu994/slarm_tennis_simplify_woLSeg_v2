@@ -132,12 +132,13 @@ def test_desynchronized_views_fail():
         owner._forward_ball_temporal_states(raw, patches.flatten(1, 2), times)
 
 
-def test_model_rejects_missing_or_misaligned_temporal_history():
+@pytest.mark.parametrize("frame_views", [1, 3])
+def test_model_rejects_missing_or_misaligned_temporal_history(frame_views):
     owner = make_owner()
     owner.patch_size = 8
     owner.aggregator = SimpleNamespace(patch_start_idx=4)
     data = {"context_image": torch.zeros(1, 1, 3, 3, 8, 8),
-            "context_frame_idx": torch.full((1, 3), 9)}
+            "context_frame_idx": torch.full((1, frame_views), 9)}
     with pytest.raises(ValueError, match="history must match"):
         owner._validate_ball_temporal_observation(data, None, streaming=True)
     with pytest.raises(ValueError, match="history must match"):
@@ -153,7 +154,24 @@ def test_model_rejects_missing_or_misaligned_temporal_history():
         owner._validate_ball_temporal_observation(data, {"num_steps": 3}, streaming=False)
 
 
-def test_session_cache_prefix_concatenation_and_reset_match_batch():
+def test_model_accepts_native_per_time_frames_and_rejects_desynchronized_views():
+    owner = make_owner()
+    frames = (torch.arange(6) * 3).expand(2, -1).float()
+    data = {"context_image": torch.zeros(2, 6, 3, 3, 8, 8),
+            "context_frame_idx": frames}
+    owner._validate_ball_temporal_observation(data, None, streaming=False)
+    data["context_frame_idx"] = frames[..., None].repeat(1, 1, 3)
+    owner._validate_ball_temporal_observation(data, None, streaming=False)
+    data["context_frame_idx"][1, 2, 1] += 3
+    with pytest.raises(ValueError, match="synchronized"):
+        owner._validate_ball_temporal_observation(data, None, streaming=False)
+    data.pop("context_frame_idx")
+    with pytest.raises(ValueError, match="context_frame_idx"):
+        owner._validate_ball_temporal_observation(data, None, streaming=False)
+
+
+@pytest.mark.parametrize("frame_views", [1, 3])
+def test_session_cache_prefix_concatenation_and_reset_match_batch(frame_views):
     owner = make_owner()
     torch.nn.init.normal_(owner.ball_temporal.out_proj.weight, std=0.1)
     raw, patches, times = inputs()
@@ -184,7 +202,7 @@ def test_session_cache_prefix_concatenation_and_reset_match_batch():
     for index in range(6):
         data = {"context_image": torch.zeros(2, 1, 3, 3, 8, 8),
                 "context_time": times[:, index:index + 1],
-                "context_frame_idx": torch.full((2, 3), index * 3)}
+                "context_frame_idx": torch.full((2, frame_views), index * 3)}
         result = session.forward_stream(data, torch.device("cpu"), torch.float32)
         assert session.ball_temporal_cache["num_steps"] == index + 1
     for key in ("ball_pos15", "ball_v15", "ball_latents", "ball_latents_raw",

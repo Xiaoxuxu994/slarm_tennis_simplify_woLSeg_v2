@@ -1574,6 +1574,8 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
         self, data_dict: dict, cache, streaming: bool, aggregator_cache=None,
     ) -> None:
         """Reject a truncated or mismatched history before expensive feature extraction."""
+        from src.utils.frame_indices import normalize_frame_indices
+
         b, t, v = data_dict["context_image"].shape[:3]
         if streaming and t != 1:
             raise ValueError("Cached temporal ball inference accepts one observation at a time")
@@ -1597,11 +1599,12 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
                             or key.ndim != 4 or value.shape != key.shape
                             or key.shape[0] != b or key.shape[2] != length):
                         raise ValueError("Aggregator and temporal ball cache histories differ")
-        frame_idx = data_dict.get("context_frame_idx")
-        if not isinstance(frame_idx, Tensor) or frame_idx.numel() != b * t * v:
-            raise ValueError("Temporal ball readout requires context_frame_idx for every view")
+        frame_idx = normalize_frame_indices(
+            data_dict.get("context_frame_idx"), batch_size=b, num_timesteps=t,
+            num_views=v, name="context_frame_idx",
+        )
         expected = (torch.arange(start, start + t, device=frame_idx.device) * 3)
-        if not torch.all(frame_idx.reshape(b, t, v) == expected[None, :, None]):
+        if not torch.all(frame_idx == expected[None, :]):
             raise ValueError("Temporal ball history must match frames 0,3,6,9,12,15; "
                              "check cache handoff or reset")
 

@@ -59,8 +59,14 @@ class TinyReadout(torch.nn.Module):
         return output
 
 
-@pytest.fixture
-def prepared():
+@pytest.fixture(params=["per_time", "flat_views", "time_views"])
+def prepared(request):
+    def indices(frames):
+        if request.param == "per_time":
+            return frames[None].float()
+        repeated = frames[:, None].expand(-1, 3)
+        return repeated.reshape(1, -1) if request.param == "flat_views" else repeated[None]
+
     frames = torch.arange(6) * 3
     time = frames.float() / 30
     gravity = torch.tensor([0, 0, -9.81])
@@ -68,13 +74,13 @@ def prepared():
     initial_velocity = torch.tensor([1.0, 0, 5.0])
     position = initial_position + time[:, None] * initial_velocity + 0.5 * time[:, None] ** 2 * gravity
     velocity = initial_velocity + time[:, None] * gravity
-    data = {"context_frame_idx": frames.repeat_interleave(3)[None],
+    data = {"context_frame_idx": indices(frames),
             "context_image": torch.rand(1, 6, 3, 3, 8, 8),
             "context_time": (time / 0.8)[None], "fps": torch.tensor([30.0]),
             "ball_timestamp": time[None], "ball_position_rig": position[None],
             "ball_velocity_rig": velocity[None], "scene_name": ["synthetic_test_only"]}
     target_time = torch.arange(25).float() / 30
-    target = {"target_frame_idx": torch.arange(25).repeat_interleave(3)[None],
+    target = {"target_frame_idx": indices(torch.arange(25)),
               "ball_timestamp": target_time[None],
               "ball_position_rig": (initial_position + target_time[:, None] * initial_velocity
                                     + 0.5 * target_time[:, None] ** 2 * gravity)[None]}
