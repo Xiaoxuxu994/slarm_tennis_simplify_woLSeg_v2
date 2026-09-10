@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1290" viewBox="0 0 1800 1290" role="img" aria-label="联合版004的因果历史与Loss监督">
+<defs><marker id="arr" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9" fill="#53616b"/></marker><marker id="new" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9" fill="#097d73"/></marker><marker id="loss" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9" fill="#b23d66"/></marker></defs>
+<style>text{font-family:"PingFang SC","Microsoft YaHei","Noto Sans CJK SC",Arial,sans-serif;fill:#17232b;letter-spacing:0}.title{font-size:34px;font-weight:700}.heading{font-size:26px;font-weight:650}.node{font-size:23px;font-weight:600}.body{font-size:21px}.small{font-size:18px}.muted{fill:#586873}.green{fill:#08776e}.pink{fill:#9e3057}</style>
+<rect width="1800" height="1290" fill="#fff"/>
+<text x="60" y="65" class="title" text-anchor="start">联合版 004：每个时刻读什么，Loss 怎么算</text>
+<text x="60" y="105" class="body muted" text-anchor="start">各时刻三目共享同一个状态头；位置逐目监督，速度与接球点由三目 mean 后的状态监督。</text>
+<line x1="60" y1="140" x2="1740" y2="140" stroke="#cbd4d9"/>
+<text x="70" y="195" class="heading" text-anchor="start">1  因果历史窗口</text>
+<text x="535" y="245" class="node" text-anchor="middle">0</text>
+<text x="740" y="245" class="node" text-anchor="middle">3</text>
+<text x="945" y="245" class="node" text-anchor="middle">6</text>
+<text x="1150" y="245" class="node" text-anchor="middle">9</text>
+<text x="1355" y="245" class="node" text-anchor="middle">12</text>
+<text x="1560" y="245" class="node" text-anchor="middle">15</text>
+<text x="70" y="247" class="body muted" text-anchor="start">可读取的观测帧</text>
+<text x="70" y="316" class="node" text-anchor="start">frame6 的 token</text>
+<text x="285" y="316" class="small muted" text-anchor="start">新增前缀监督</text>
+<rect x="453" y="282" width="164" height="52" rx="6" fill="#e8f7f3" stroke="#19867b" stroke-width="1.8"/>
+<text x="535" y="316" class="node" text-anchor="middle">三目 patches</text>
+<rect x="658" y="282" width="164" height="52" rx="6" fill="#e8f7f3" stroke="#19867b" stroke-width="1.8"/>
+<text x="740" y="316" class="node" text-anchor="middle">三目 patches</text>
+<rect x="863" y="282" width="164" height="52" rx="6" fill="#e8f7f3" stroke="#19867b" stroke-width="1.8"/>
+<text x="945" y="316" class="node" text-anchor="middle">三目 patches</text>
+<rect x="1068" y="282" width="164" height="52" rx="6" fill="#f6f8fa" stroke="#9caab2" stroke-width="1.8"/>
+<text x="1150" y="316" class="node" text-anchor="middle">不可访问</text>
+<rect x="1273" y="282" width="164" height="52" rx="6" fill="#f6f8fa" stroke="#9caab2" stroke-width="1.8"/>
+<text x="1355" y="316" class="node" text-anchor="middle">不可访问</text>
+<rect x="1478" y="282" width="164" height="52" rx="6" fill="#f6f8fa" stroke="#9caab2" stroke-width="1.8"/>
+<text x="1560" y="316" class="node" text-anchor="middle">不可访问</text>
+<text x="70" y="394" class="node" text-anchor="start">frame9 的 token</text>
+<text x="285" y="394" class="small muted" text-anchor="start">新增前缀监督</text>
+<rect x="453" y="360" width="164" height="52" rx="6" fill="#e8f7f3" stroke="#19867b" stroke-width="1.8"/>
+<text x="535" y="394" class="node" text-anchor="middle">三目 patches</text>
+<rect x="658" y="360" width="164" height="52" rx="6" fill="#e8f7f3" stroke="#19867b" stroke-width="1.8"/>
+<text x="740" y="394" class="node" text-anchor="middle">三目 patches</text>
+<rect x="863" y="360" width="164" height="52" rx="6" fill="#e8f7f3" stroke="#19867b" stroke-width="1.8"/>
+<text x="945" y="394" class="node" text-anchor="middle">三目 patches</text>
+<rect x="1068" y="360" width="164" height="52" rx="6" fill="#e8f7f3" stroke="#19867b" stroke-width="1.8"/>
+<text x="1150" y="394" class="node" text-anchor="middle">三目 patches</text>
+<rect x="1273" y="360" width="164" height="52" rx="6" fill="#f6f8fa" stroke="#9caab2" stroke-width="1.8"/>
+<text x="1355" y="394" class="node" text-anchor="middle">不可访问</text>
+<rect x="1478" y="360" width="164" height="52" rx="6" fill="#f6f8fa" stroke="#9caab2" stroke-width="1.8"/>
+<text x="1560" y="394" class="node" text-anchor="middle">不可访问</text>
+<text x="70" y="472" class="node" text-anchor="start">frame12 的 token</text>
+<text x="285" y="472" class="small muted" text-anchor="start">新增前缀监督</text>
+<rect x="453" y="438" width="164" height="52" rx="6" fill="#e8f7f3" stroke="#19867b" stroke-width="1.8"/>
+<text x="535" y="472" class="node" text-anchor="middle">三目 patches</text>
+<rect x="658" y="438" width="164" height="52" rx="6" fill="#e8f7f3" stroke="#19867b" stroke-width="1.8"/>
+<text x="740" y="472" class="node" text-anchor="middle">三目 patches</text>
+<rect x="863" y="438" width="164" height="52" rx="6" fill="#e8f7f3" stroke="#19867b" stroke-width="1.8"/>
+<text x="945" y="472" class="node" text-anchor="middle">三目 patches</text>
+<rect x="1068" y="438" width="164" height="52" rx="6" fill="#e8f7f3" stroke="#19867b" stroke-width="1.8"/>
+<text x="1150" y="472" class="node" text-anchor="middle">三目 patches</text>
+<rect x="1273" y="438" width="164" height="52" rx="6" fill="#e8f7f3" stroke="#19867b" stroke-width="1.8"/>
+<text x="1355" y="472" class="node" text-anchor="middle">三目 patches</text>
+<rect x="1478" y="438" width="164" height="52" rx="6" fill="#f6f8fa" stroke="#9caab2" stroke-width="1.8"/>
+<text x="1560" y="472" class="node" text-anchor="middle">不可访问</text>
+<text x="70" y="550" class="node" text-anchor="start">frame15 的 token</text>
+<text x="285" y="550" class="small muted" text-anchor="start">保留末帧监督</text>
+<rect x="453" y="516" width="164" height="52" rx="6" fill="#e8f7f3" stroke="#19867b" stroke-width="1.8"/>
+<text x="535" y="550" class="node" text-anchor="middle">三目 patches</text>
+<rect x="658" y="516" width="164" height="52" rx="6" fill="#e8f7f3" stroke="#19867b" stroke-width="1.8"/>
+<text x="740" y="550" class="node" text-anchor="middle">三目 patches</text>
+<rect x="863" y="516" width="164" height="52" rx="6" fill="#e8f7f3" stroke="#19867b" stroke-width="1.8"/>
+<text x="945" y="550" class="node" text-anchor="middle">三目 patches</text>
+<rect x="1068" y="516" width="164" height="52" rx="6" fill="#e8f7f3" stroke="#19867b" stroke-width="1.8"/>
+<text x="1150" y="550" class="node" text-anchor="middle">三目 patches</text>
+<rect x="1273" y="516" width="164" height="52" rx="6" fill="#e8f7f3" stroke="#19867b" stroke-width="1.8"/>
+<text x="1355" y="550" class="node" text-anchor="middle">三目 patches</text>
+<rect x="1478" y="516" width="164" height="52" rx="6" fill="#e8f7f3" stroke="#19867b" stroke-width="1.8"/>
+<text x="1560" y="550" class="node" text-anchor="middle">三目 patches</text>
+<text x="70" y="618" class="body muted" text-anchor="start">frame0 / 3 不加直接前缀状态 loss；frame15 已有主监督，不在新增 prefix loss 中重复计算。</text>
+<line x1="60" y1="660" x2="1740" y2="660" stroke="#d5dde1"/>
+<text x="70" y="711" class="heading" text-anchor="start">2  每个受监督时刻 t 的三条读出</text>
+<path d="M365 835 H430 V778 H472" fill="none" stroke="#b23d66" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#loss)"/>
+<path d="M365 835 H430 V962 H472" fill="none" stroke="#097d73" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#new)"/>
+<path d="M860 780 H937" fill="none" stroke="#b23d66" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#loss)"/>
+<path d="M860 955 H937" fill="none" stroke="#b23d66" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#loss)"/>
+<path d="M860 975 H898 V1090 H937" fill="none" stroke="#b23d66" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#loss)"/>
+<rect x="70" y="785" width="295" height="105" rx="6" fill="#e8f7f3" stroke="#19867b" stroke-width="1.8"/>
+<text x="217.5" y="831.5" class="body" text-anchor="middle">增强 tokens z′[t,view]</text>
+<text x="217.5" y="859.5" class="body" text-anchor="middle">三个视角</text>
+<rect x="475" y="745" width="385" height="70" rx="6" fill="#f6f8fa" stroke="#9caab2" stroke-width="1.8"/>
+<text x="667.5" y="788" class="node" text-anchor="middle">每目 → 共享 MLP → p[t,view]</text>
+<rect x="475" y="920" width="385" height="90" rx="6" fill="#f6f8fa" stroke="#9caab2" stroke-width="1.8"/>
+<text x="667.5" y="959" class="body" text-anchor="middle">三目 mean → 同一个共享 MLP</text>
+<text x="667.5" y="987" class="body" text-anchor="middle">得到 pooled p_t / v_t</text>
+<rect x="940" y="735" width="775" height="90" rx="6" fill="#fcf0f4" stroke="#c26a8a" stroke-width="1.8"/>
+<text x="1327.5" y="774" class="body" text-anchor="middle">位置：与同一时刻同一个 GT 球心比较</text>
+<text x="1327.5" y="802" class="body" text-anchor="middle">按 batch / view / xyz 平均；SmoothL1，位置尺度 0.1 m</text>
+<rect x="940" y="905" width="775" height="85" rx="6" fill="#fcf0f4" stroke="#c26a8a" stroke-width="1.8"/>
+<text x="1327.5" y="941.5" class="body" text-anchor="middle">速度：v_t 与该时刻 GT 速度比较</text>
+<text x="1327.5" y="969.5" class="body" text-anchor="middle">SmoothL1，沿用原 velocity 归一化尺度</text>
+<rect x="940" y="1040" width="775" height="110" rx="6" fill="#fcf0f4" stroke="#c26a8a" stroke-width="1.8"/>
+<text x="1327.5" y="1075" class="body" text-anchor="middle">接球点：由 p_t / v_t 按重力外推至同一个 frame45</text>
+<text x="1327.5" y="1103" class="body" text-anchor="middle">每个 prefix 使用自己的 Δt = t_catch − t</text>
+<text x="1327.5" y="1131" class="body" text-anchor="middle">与解析 GT 接球点比较；不是分别外推固定 1 秒</text>
+<text x="70" y="1085" class="body muted" text-anchor="start">所有 GT 只参与右侧 loss，</text>
+<text x="70" y="1117" class="body muted" text-anchor="start">不会输入新增 attention。</text>
+<line x1="60" y1="1190" x2="1740" y2="1190" stroke="#cbd4d9"/>
+<text x="60" y="1232" class="node" text-anchor="start">总损失 = 原 B 损失 + 0.25 × Lprefix_pos + 0.25 × Lprefix_vel + 0.25 × Lprefix_landing</text>
+<text x="60" y="1270" class="small muted" text-anchor="start">每个 prefix loss 内部：frame6 / 9 / 12 按 1/7、2/7、4/7 加权。末帧原 velocity / trajectory / landing 与重建权重不变。</text>
+</svg>

@@ -223,7 +223,7 @@ def test_loss_triggers_on_output_key_not_on_a_config_flag():
     接上监督；按 config 判断则每加一种都要记得改损失，漏了就是静默失败。
     """
     src = (WORKTREE / "src/utils/stream25_losses.py").read_text(encoding="utf-8")
-    pos = src.find("ball_pos_loss = F.smooth_l1_loss")
+    pos = src.find("ball_pos_loss = ball_position_supervision")
     assert pos > 0, "ball_pos loss not found in stream25_losses.py"
     guard_start = src.rfind('if "ball_pos15" in output', 0, pos)
     assert guard_start > 0, (

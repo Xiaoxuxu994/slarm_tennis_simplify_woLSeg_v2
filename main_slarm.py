@@ -274,6 +274,18 @@ def get_args_parser():
                         help="ball token as an aggregator special token (like sky/affine), "
                              "so it goes through every attention layer and can shape the "
                              "backbone. Do not enable together with --use_ball_token.")
+    parser.add_argument("--ball_pos_supervision", default="pooled",
+                        choices=("pooled", "per_view", "per_view_cross"),
+                        help="In-trunk position loss: original pooled, B per-view, or C per-view patch cross-attention")
+    parser.add_argument("--ball_prefix_supervision", action="store_true",
+                        help="Export causal per-prefix states for auxiliary physical supervision")
+    parser.add_argument("--ball_temporal_refine", action="store_true",
+                        help="Refine ball tokens from causal historical patches on the MAIN output path")
+    parser.add_argument("--ball_temporal_hidden_dim", type=int, default=256)
+    parser.add_argument("--ball_temporal_num_heads", type=int, default=4)
+    parser.add_argument("--stream25_ball_prefix_pos_weight", type=float, default=0.0)
+    parser.add_argument("--stream25_ball_prefix_vel_weight", type=float, default=0.0)
+    parser.add_argument("--stream25_ball_prefix_landing_weight", type=float, default=0.0)
     # 球半径（米）。只被评测侧的球心补偿用到（eval / verify 的
     # --ball-radius-compensation），训练损失不读它。6.5cm 球 -> 0.0325；24cm 那批要改。
     parser.add_argument("--stream25_ball_radius", type=float, default=0.0325)
@@ -711,7 +723,7 @@ def main(args):
         # probe（token 零初始化、只有读出头能学）。这里让它行为正确、不静默出错，
         # 但不要这么用。
         _ball_prefixes = ("ball_query", "ball_block", "ball_head",
-                          "ball_token_norm", "aggregator.ball_token")
+                          "ball_token_norm", "aggregator.ball_token", "ball_pos_cross", "ball_temporal")
         for _name, _p in model.named_parameters():
             if not _name.startswith(_ball_prefixes):
                 _p.requires_grad = False

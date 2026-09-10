@@ -221,7 +221,7 @@ def main() -> int:
         print("ball_token_freeze_backbone is ON")
         print("-" * 78)
         prefixes = ("ball_query", "ball_block", "ball_head",
-                    "ball_token_norm", "aggregator.ball_token")
+                    "ball_token_norm", "aggregator.ball_token", "ball_pos_cross", "ball_temporal")
         trainable = [(n, p.numel()) for n, p in model.named_parameters()
                      if n.startswith(prefixes)]
         n_tr = sum(c for _, c in trainable)

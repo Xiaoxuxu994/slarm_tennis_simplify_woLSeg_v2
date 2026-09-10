@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1340" viewBox="0 0 1800 1340" role="img" aria-label="Ball-token 改动前后：B/C 与联合版004">
+<defs><marker id="arr" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9" fill="#53616b"/></marker><marker id="new" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9" fill="#097d73"/></marker><marker id="loss" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9" fill="#b23d66"/></marker></defs>
+<style>text{font-family:"PingFang SC","Microsoft YaHei","Noto Sans CJK SC",Arial,sans-serif;fill:#17232b;letter-spacing:0}.title{font-size:34px;font-weight:700}.heading{font-size:26px;font-weight:650}.node{font-size:23px;font-weight:600}.body{font-size:21px}.small{font-size:18px}.muted{fill:#586873}.green{fill:#08776e}.pink{fill:#9e3057}</style>
+<rect width="1800" height="1340" fill="#fff"/>
+<text x="60" y="65" class="title" text-anchor="start">Ball-token：之前的 B/C 与新的联合版 004</text>
+<text x="60" y="104" class="body muted" text-anchor="start">共同约束：仅输入三目 frame 0 / 3 / 6 / 9 / 12 / 15；GT 只用于监督，不进入新增 attention。</text>
+<line x1="60" y1="140" x2="1740" y2="140" stroke="#cbd4d9"/><line x1="890" y1="170" x2="890" y2="1210" stroke="#d4dde1"/>
+<text x="75" y="197" class="heading" text-anchor="start">之前：B / C</text>
+<text x="75" y="231" class="body muted" text-anchor="start">主状态与导出仍走原始末帧 token</text>
+<text x="940" y="197" class="heading green" text-anchor="start">现在：联合版 004</text>
+<text x="940" y="231" class="body green" text-anchor="start">增强 token 真正进入主状态、监督与导出</text>
+<path d="M435 335 V365 H240 V402" fill="none" stroke="#53616b" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arr)"/>
+<path d="M435 365 H630 V402" fill="none" stroke="#53616b" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arr)"/>
+<path d="M240 490 V572" fill="none" stroke="#53616b" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arr)"/>
+<path d="M240 645 V702" fill="none" stroke="#53616b" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arr)"/>
+<path d="M240 780 V857" fill="none" stroke="#53616b" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arr)"/>
+<path d="M405 445 H430 V535 H630 V557" fill="none" stroke="#53616b" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arr)"/>
+<path d="M790 445 H825 V735 H792" fill="none" stroke="#53616b" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arr)" stroke-dasharray="7 5"/>
+<path d="M405 460 H445 V735 H468" fill="none" stroke="#53616b" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#arr)" stroke-dasharray="7 5"/>
+<path d="M630 780 V857" fill="none" stroke="#b23d66" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#loss)" stroke-dasharray="7 5"/>
+<rect x="75" y="270" width="720" height="65" rx="6" fill="#f6f8fa" stroke="#9caab2" stroke-width="1.8"/>
+<text x="435" y="310.5" class="node" text-anchor="middle">原因果 SLARM 主干</text>
+<rect x="75" y="405" width="330" height="85" rx="6" fill="#f6f8fa" stroke="#9caab2" stroke-width="1.8"/>
+<text x="240" y="441.5" class="body" text-anchor="middle">frame15 原始 ball tokens</text>
+<text x="240" y="469.5" class="body" text-anchor="middle">3 个视角 × 1536 维</text>
+<rect x="470" y="405" width="320" height="85" rx="6" fill="#f6f8fa" stroke="#9caab2" stroke-width="1.8"/>
+<text x="630" y="441.5" class="body" text-anchor="middle">frame15 patches</text>
+<text x="630" y="469.5" class="body" text-anchor="middle">各目自己的末帧特征</text>
+<rect x="75" y="575" width="330" height="70" rx="6" fill="#f6f8fa" stroke="#9caab2" stroke-width="1.8"/>
+<text x="240" y="618" class="node" text-anchor="middle">三目 mean → 共享 MLP</text>
+<rect x="75" y="705" width="330" height="75" rx="6" fill="#f6f8fa" stroke="#9caab2" stroke-width="1.8"/>
+<text x="240" y="736.5" class="body" text-anchor="middle">主 p15 / v15</text>
+<text x="240" y="764.5" class="body" text-anchor="middle">原 velocity / traj / landing loss</text>
+<rect x="75" y="860" width="330" height="75" rx="6" fill="#f6f8fa" stroke="#9caab2" stroke-width="1.8"/>
+<text x="240" y="905.5" class="node" text-anchor="middle">物理外推 → frame45</text>
+<rect x="470" y="560" width="320" height="75" rx="6" fill="#eef4fd" stroke="#6889ad" stroke-width="1.8"/>
+<text x="630" y="591.5" class="body" text-anchor="middle">导出 ball_latents</text>
+<text x="630" y="619.5" class="body" text-anchor="middle">仍是原始 tokens</text>
+<rect x="470" y="690" width="320" height="90" rx="6" fill="#f6f8fa" stroke="#9caab2" stroke-width="1.8"/>
+<text x="630" y="729" class="body" text-anchor="middle">仅 C：1536 维 cross-attn</text>
+<text x="630" y="757" class="body" text-anchor="middle">每目 query 读同目末帧 patches</text>
+<rect x="470" y="860" width="320" height="75" rx="6" fill="#fcf0f4" stroke="#c26a8a" stroke-width="1.8"/>
+<text x="630" y="905.5" class="node" text-anchor="middle">共享 MLP → 逐目位置 loss</text>
+<text x="490" y="977" class="body pink" text-anchor="start">C 的增强特征不进入左侧主状态，</text>
+<text x="490" y="1006" class="body pink" text-anchor="start">也不替换导出的 ball_latents。</text>
+<text x="75" y="1065" class="body muted" text-anchor="start">B：跳过 C 的 cross-attention，直接逐目读原始 token。</text>
+<text x="75" y="1099" class="body muted" text-anchor="start">B/C 的逐目位置 loss 都替换旧 pooled-pos loss。</text>
+<text x="75" y="1160" class="small muted" text-anchor="start">左侧实线：主输出 / 导出路径    虚线：C 辅助位置分支</text>
+<path d="M1320 335 V365 H1100 V402" fill="none" stroke="#097d73" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#new)"/>
+<path d="M1320 365 H1530 V402" fill="none" stroke="#097d73" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#new)"/>
+<path d="M1100 490 V557" fill="none" stroke="#097d73" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#new)"/>
+<path d="M1530 490 V557" fill="none" stroke="#097d73" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#new)"/>
+<path d="M1100 620 V653 H1210 V682" fill="none" stroke="#097d73" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#new)"/>
+<path d="M1530 620 V653 H1470 V682" fill="none" stroke="#097d73" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#new)"/>
+<path d="M1340 775 V832" fill="none" stroke="#097d73" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#new)"/>
+<path d="M945 447 H918 V885 H1057" fill="none" stroke="#097d73" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#new)"/>
+<text x="932" y="799" class="small green" text-anchor="start">原 token</text>
+<text x="932" y="828" class="small green" text-anchor="start">残差连接</text>
+<rect x="945" y="270" width="780" height="65" rx="6" fill="#f6f8fa" stroke="#9caab2" stroke-width="1.8"/>
+<text x="1335" y="310.5" class="node" text-anchor="middle">原因果 SLARM 主干（结构不变）</text>
+<rect x="945" y="405" width="310" height="85" rx="6" fill="#f6f8fa" stroke="#9caab2" stroke-width="1.8"/>
+<text x="1100" y="441.5" class="body" text-anchor="middle">每个时刻的三目 ball tokens</text>
+<text x="1100" y="469.5" class="body" text-anchor="middle">原 token z[t, view]</text>
+<rect x="1350" y="405" width="375" height="85" rx="6" fill="#f6f8fa" stroke="#9caab2" stroke-width="1.8"/>
+<text x="1537.5" y="441.5" class="body" text-anchor="middle">每个时刻的三目 patches</text>
+<text x="1537.5" y="469.5" class="body" text-anchor="middle">已有的历史观测特征</text>
+<rect x="945" y="560" width="310" height="60" rx="6" fill="#e8f7f3" stroke="#19867b" stroke-width="1.8"/>
+<text x="1100" y="598" class="node" text-anchor="middle">投影为 256 维 Query</text>
+<rect x="1350" y="560" width="375" height="60" rx="6" fill="#e8f7f3" stroke="#19867b" stroke-width="1.8"/>
+<text x="1537.5" y="598" class="node" text-anchor="middle">256 维 K/V 历史缓存</text>
+<rect x="1060" y="685" width="550" height="90" rx="6" fill="#e8f7f3" stroke="#19867b" stroke-width="1.8"/>
+<text x="1335" y="724" class="body" text-anchor="middle">因果 cross-attention + FFN</text>
+<text x="1335" y="752" class="body" text-anchor="middle">读取当前及更早时刻的全部三目 patches</text>
+<rect x="1060" y="835" width="550" height="90" rx="6" fill="#e8f7f3" stroke="#19867b" stroke-width="1.8"/>
+<text x="1335" y="874" class="body" text-anchor="middle">z′ = z + 输出投影（初始为 0）</text>
+<text x="1335" y="902" class="body" text-anchor="middle">增强后仍是每目 1536 维</text>
+<path d="M1340 925 V963 H1048 V997" fill="none" stroke="#097d73" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#new)"/>
+<path d="M1340 963 H1340 V997" fill="none" stroke="#097d73" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#new)"/>
+<path d="M1340 963 H1620 V997" fill="none" stroke="#097d73" stroke-width="2.3" stroke-linejoin="round" marker-end="url(#new)"/>
+<rect x="940" y="1000" width="235" height="85" rx="6" fill="#fcf0f4" stroke="#c26a8a" stroke-width="1.8"/>
+<text x="1057.5" y="1036.5" class="body" text-anchor="middle">每目 → 共享 MLP</text>
+<text x="1057.5" y="1064.5" class="body" text-anchor="middle">位置监督</text>
+<rect x="1215" y="1000" width="250" height="85" rx="6" fill="#e8f7f3" stroke="#19867b" stroke-width="1.8"/>
+<text x="1340" y="1036.5" class="body" text-anchor="middle">mean → 共享 MLP</text>
+<text x="1340" y="1064.5" class="body" text-anchor="middle">p/v 与接球点</text>
+<rect x="1505" y="1000" width="230" height="85" rx="6" fill="#eef4fd" stroke="#6889ad" stroke-width="1.8"/>
+<text x="1620" y="1036.5" class="body" text-anchor="middle">frame15 增强 tokens</text>
+<text x="1620" y="1064.5" class="body" text-anchor="middle">导出 ball_latents</text>
+<text x="940" y="1130" class="body green" text-anchor="start">新增：frame6 / 9 / 12 的直接状态监督（详见第二张图）</text>
+<text x="940" y="1164" class="body green" text-anchor="start">保留：三目 mean、3 个末帧 tokens、原物理外推公式</text>
+<line x1="60" y1="1220" x2="1740" y2="1220" stroke="#cbd4d9"/>
+<text x="60" y="1262" class="node" text-anchor="start">两边都保留：原 patches → GS / MS3 / 语义 / Renderer → 原重建损失</text>
+<text x="60" y="1303" class="body muted" text-anchor="start">GS 并非由增强 ball token 直接生成；新增监督可以通过共享主干间接影响重建。架构图不代表已测得精度提升。</text>
+</svg>

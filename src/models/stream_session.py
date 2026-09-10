@@ -40,7 +40,8 @@ class StreamSession:
         named_keys = ['gs_params', 'pred_feat', 'sky_token','affine_tokens', 'pred_context_depth',
                   'pred_context_camera_enc_list','pred_context_depth_conf', 'pred_context_pts3d',
                   'pred_context_pts3d_conf', 'pred_task_semantic',
-                  'ball_pos15', 'ball_v15']
+                  'ball_pos15', 'ball_v15', 'ball_latents', 'ball_pos15_per_view',
+                  'ball_latents_raw', 'ball_prefix_states', 'ball_prefix_positions_per_view']
         for k in named_keys:
             self.predictions[k] = None
 
@@ -48,7 +49,8 @@ class StreamSession:
         for k in ['gs_params', 'pred_feat', 'sky_token','affine_tokens', 'pred_context_depth',
                   'pred_context_camera_enc_list','pred_context_depth_conf', 'pred_context_pts3d',
                   'pred_context_pts3d_conf', 'latest_perception_tokens',
-                  'pred_task_semantic', 'ball_pos15', 'ball_v15']:
+                  'pred_task_semantic', 'ball_pos15', 'ball_v15', 'ball_latents', 'ball_pos15_per_view',
+                  'ball_latents_raw', 'ball_prefix_states', 'ball_prefix_positions_per_view']:
 
             if k not in predictions:
                 continue
@@ -110,7 +112,8 @@ class StreamSession:
                 self.predictions[k] = pred_value # TODO: now use last token
                 continue
 
-            if k in ('ball_pos15', 'ball_v15'):
+            if k in ('ball_pos15', 'ball_v15', 'ball_latents', 'ball_pos15_per_view', 'ball_latents_raw'):
+                # ball_latents is [b, v, c]: dim=1 is views, not time.
                 # ball token 输出 [b, 3]，没有时间轴，不能沿 dim=1 拼接。
                 # 每次 forward 覆盖，流完 window 后留下的就是最后一次观测(frame15)的球状态。
                 self.predictions[k] = pred_value
@@ -129,6 +132,7 @@ class StreamSession:
         self.camera_head_kv_cache_list = [[[None, None] for _ in range(self.camera_head_kv_cache_depth)] for _ in range(self.camera_head_iterations)] if self.model.camera_head is not None else None
         self.num_streamed_observations = 0
         self.streamed_context = {}
+        self.ball_temporal_cache = None
 
     def _append_streamed_context(self, input_dict):
         for key, value in input_dict.items():
@@ -140,6 +144,10 @@ class StreamSession:
             )
 
     def _validate_observation(self, input_dict):
+        strict_ball = (getattr(self.model, "ball_temporal_refine", False)
+                       or getattr(self.model, "ball_prefix_supervision", False))
+        if strict_ball and (self.mode != "window" or self.window_size != 6):
+            raise ValueError("Temporal ball readout requires a six-observation window session")
         image = input_dict.get("context_image")
         if not isinstance(image, torch.Tensor) or image.ndim != 6:
             pass
@@ -152,6 +160,8 @@ class StreamSession:
             getattr(self.model, "terminal_context_extrapolation", False)
             and self.num_streamed_observations >= self.window_size
         ):
+            if strict_ball:
+                raise ValueError("The six-observation ball window is complete; clear the session")
             pass
         if self.expected_context_frames is None:
             return
@@ -161,6 +171,8 @@ class StreamSession:
         values = {int(value) for value in frame_idx.detach().cpu().reshape(-1).tolist()}
         expected = self.expected_context_frames[self.num_streamed_observations]
         if values != {expected}:
+            if strict_ball:
+                raise ValueError(f"Expected context frame {expected}, got {sorted(values)}")
             pass
 
     def _render_accumulated_window(self, input_dict):
@@ -255,6 +267,8 @@ class StreamSession:
         forward_kwargs = {}
         if terminal_extrapolation:
             forward_kwargs["render_targets"] = False
+        if getattr(self.model, "ball_temporal_refine", False):
+            forward_kwargs["ball_temporal_cache"] = self.ball_temporal_cache
 
         with torch.no_grad():
             with torch.autocast(
@@ -270,6 +284,8 @@ class StreamSession:
                     **forward_kwargs,
                 )
 
+        if getattr(self.model, "ball_temporal_refine", False):
+            self.ball_temporal_cache = outputs["ball_temporal_cache"]
         self._append_streamed_context(input_dict)
         self._update_predictions(outputs)
         self._update_cache(outputs["aggregator_kv_cache_list"], outputs["camera_head_kv_cache_list"])

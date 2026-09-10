@@ -33,6 +33,7 @@ else:
 
 from .decoder import ConvDecoder, DummyDecoder, ModulatedLinearLayer
 from .layers import Block, LayerNorm2d, Mlp
+from .ball_temporal import BallTemporalRefiner
 from .components.aggregator.aggregator import Aggregator
 from .components.heads.camera_head import CameraHead
 from .components.heads.dpt_head import DPTHead
@@ -181,6 +182,11 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
         # 预测球心 pos15(xyz, rig系)+ 速度 v15。默认关闭时完全不影响现有行为。
         use_ball_token=False,
         use_ball_token_intrunk=False,
+        ball_pos_supervision="pooled",
+        ball_prefix_supervision=False,
+        ball_temporal_refine=False,
+        ball_temporal_hidden_dim=256,
+        ball_temporal_num_heads=4,
         # stream
         mode="full", #  default use full attention
         **kwargs,
@@ -266,6 +272,23 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
         self.ms3_physics_override = ms3_physics_override
         self.use_ball_token = use_ball_token
         self.use_ball_token_intrunk = use_ball_token_intrunk
+        if ball_pos_supervision not in ("pooled", "per_view", "per_view_cross"):
+            raise ValueError(f"Unknown ball_pos_supervision: {ball_pos_supervision}")
+        if ball_pos_supervision != "pooled" and (
+            not use_ball_token_intrunk or use_ball_token or not use_last_token
+        ):
+            raise ValueError("Per-view ball position requires in-trunk only and use_last_token=True")
+        self.ball_pos_supervision = ball_pos_supervision
+        self.ball_prefix_supervision = bool(ball_prefix_supervision)
+        self.ball_temporal_refine = bool(ball_temporal_refine)
+        if self.ball_prefix_supervision or self.ball_temporal_refine:
+            if (not use_ball_token_intrunk or use_ball_token or not use_last_token
+                    or not terminal_context_extrapolation or mode != "window_6"):
+                raise ValueError("Temporal ball readout requires in-trunk only, use_last_token, "
+                                 "terminal_context_extrapolation and mode=window_6")
+            if ball_pos_supervision == "per_view_cross":
+                raise ValueError("Temporal ball readout cannot be combined with legacy C; "
+                                 "use ball_pos_supervision=per_view or pooled")
         self.add_angular_velocity = add_angular_velocity
         if self.use_ms3_motion:
             self.ms3_deg = ms3_deg
@@ -451,6 +474,19 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
             if self.use_ball_token_intrunk:
                 self.ball_token_norm = nn.LayerNorm(2 * embed_dim)
                 self.ball_head_intrunk = Mlp(2 * embed_dim, 2 * embed_dim, 6)  # pos3 + vel3
+                if self.ball_pos_supervision == "per_view_cross":
+                    self.ball_pos_cross = Block(dim=2 * embed_dim, num_heads=16, use_cross_attn=True)
+                    # Start C as B: both residual branches initially contribute zero.
+                    nn.init.zeros_(self.ball_pos_cross.attn.proj.weight)
+                    nn.init.zeros_(self.ball_pos_cross.attn.proj.bias)
+                    nn.init.zeros_(self.ball_pos_cross.mlp.fc2.weight)
+                    nn.init.zeros_(self.ball_pos_cross.mlp.fc2.bias)
+                if getattr(self, "ball_temporal_refine", False):
+                    self.ball_temporal = BallTemporalRefiner(
+                        dim=2 * embed_dim, hidden_dim=ball_temporal_hidden_dim,
+                        num_heads=ball_temporal_num_heads, max_views=num_cams,
+                        window_size=6,
+                    )
         else:
             # gs head
             self.dense_feats_dim = 256  # 256 is dpt default feature dim
@@ -553,6 +589,15 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
                     nn.init.zeros_(module.bias)
 
         self.apply(_basic_init)
+        # Global Linear initialization must not undo identity residual branches.
+        if hasattr(self, "ball_pos_cross"):
+            nn.init.zeros_(self.ball_pos_cross.attn.proj.weight)
+            nn.init.zeros_(self.ball_pos_cross.attn.proj.bias)
+            nn.init.zeros_(self.ball_pos_cross.mlp.fc2.weight)
+            nn.init.zeros_(self.ball_pos_cross.mlp.fc2.bias)
+        if hasattr(self, "ball_temporal"):
+            nn.init.zeros_(self.ball_temporal.out_proj.weight)
+            nn.init.zeros_(self.ball_temporal.out_proj.bias)
 
     def load_pretrained_vggt(self, vggt_ckpts_filepath=''):
         vggt_pretrained_weight = torch.load(vggt_ckpts_filepath)
@@ -1474,12 +1519,99 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
             data_dict["height"] //= self.patch_size
         return data_dict, ray_dict
 
+    def _forward_ball_position_views(self, ball_latents: Tensor, patch_tokens: Tensor) -> Tensor:
+        """Read one rig-frame position per terminal view, preserving the pooled path."""
+        b, v, c = ball_latents.shape
+        features = ball_latents
+        if self.ball_pos_supervision == "per_view_cross":
+            # Flatten batch and view together; never mix different views in this block.
+            patches = patch_tokens[:, -v:].reshape(b * v, -1, c)
+            query = ball_latents.reshape(b * v, 1, c)
+            features = self.ball_pos_cross(query, patches).reshape(b, v, c)
+        return self.ball_head_intrunk(features)[..., :3]
+
+    def _forward_ball_temporal_states(
+        self, ball_tokens: Tensor, patch_tokens: Tensor, context_time: Tensor,
+        cache=None,
+    ) -> dict:
+        """Use the same refined features for state losses, inference and export."""
+        b, t, v, c = ball_tokens.shape
+        raw = ball_tokens
+        result = {}
+        if self.ball_temporal_refine:
+            if context_time.shape == (b, t, v):
+                if not torch.allclose(context_time, context_time[..., :1].expand_as(context_time)):
+                    raise ValueError("Temporal ball readout requires synchronized views")
+                times = context_time[..., 0]
+            elif context_time.shape == (b, t):
+                times = context_time
+            else:
+                raise ValueError("context_time must have shape [B,T,V] or [B,T]")
+            patches = patch_tokens.reshape(b, t, v, -1, c)
+            ball_tokens, cache = self.ball_temporal(ball_tokens, patches, times, cache=cache)
+            result["ball_temporal_cache"] = cache
+            result["ball_latents_raw"] = raw[:, -1]
+        # Match the per-observation MLP shapes used by streaming inference.
+        states = torch.stack([
+            self.ball_head_intrunk(ball_tokens[:, step].mean(dim=1)) for step in range(t)
+        ], dim=1)
+        result["ball_pos15"] = states[:, -1, :3]
+        result["ball_v15"] = states[:, -1, 3:]
+        result["ball_latents"] = ball_tokens[:, -1]
+        if self.ball_prefix_supervision or self.ball_pos_supervision != "pooled":
+            positions = torch.stack([
+                self.ball_head_intrunk(ball_tokens[:, step])[..., :3] for step in range(t)
+            ], dim=1)
+            if self.ball_pos_supervision != "pooled":
+                result["ball_pos15_per_view"] = positions[:, -1]
+            if self.ball_prefix_supervision:
+                result["ball_prefix_positions_per_view"] = positions
+        if self.ball_prefix_supervision:
+            result["ball_prefix_states"] = states
+        return result
+
+    def _validate_ball_temporal_observation(
+        self, data_dict: dict, cache, streaming: bool, aggregator_cache=None,
+    ) -> None:
+        """Reject a truncated or mismatched history before expensive feature extraction."""
+        b, t, v = data_dict["context_image"].shape[:3]
+        if streaming and t != 1:
+            raise ValueError("Cached temporal ball inference accepts one observation at a time")
+        if cache is not None and not streaming:
+            raise ValueError("Temporal ball cache requires the matching aggregator cache")
+        if cache is not None and not isinstance(cache, dict):
+            raise ValueError("Temporal ball cache must be a dictionary")
+        start = 0 if cache is None else cache.get("num_steps")
+        if not isinstance(start, int) or start < 0 or start + t > 6:
+            raise ValueError("Invalid temporal ball history length; reset at each scene")
+        if streaming and aggregator_cache is not None:
+            for key, value in aggregator_cache:
+                if start == 0:
+                    if key is not None or value is not None:
+                        raise ValueError("Aggregator and temporal ball cache histories differ")
+                else:
+                    h, w = data_dict["context_image"].shape[-2:]
+                    per_view = (h // self.patch_size) * (w // self.patch_size) + self.aggregator.patch_start_idx
+                    length = start * v * per_view
+                    if (not isinstance(key, Tensor) or not isinstance(value, Tensor)
+                            or key.ndim != 4 or value.shape != key.shape
+                            or key.shape[0] != b or key.shape[2] != length):
+                        raise ValueError("Aggregator and temporal ball cache histories differ")
+        frame_idx = data_dict.get("context_frame_idx")
+        if not isinstance(frame_idx, Tensor) or frame_idx.numel() != b * t * v:
+            raise ValueError("Temporal ball readout requires context_frame_idx for every view")
+        expected = (torch.arange(start, start + t, device=frame_idx.device) * 3)
+        if not torch.all(frame_idx.reshape(b, t, v) == expected[None, :, None]):
+            raise ValueError("Temporal ball history must match frames 0,3,6,9,12,15; "
+                             "check cache handoff or reset")
+
     def forward(self,
                 data_dict,
                 stream_save=True,
                 aggregator_kv_cache_list: List[List[torch.Tensor]] = None,
                 camera_head_kv_cache_list: List[List[List[torch.Tensor]]] = None,
-                render_targets: bool = True):
+                render_targets: bool = True,
+                ball_temporal_cache=None):
         # if not self.training:
         #     print(f"Begin Inference And Use {self.mode} Mode")
 
@@ -1487,6 +1619,11 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
             start = time.time()
         images = data_dict["context_image"]
         b, t, v, c, h, w = images.size()
+        if self.ball_temporal_refine:
+            self._validate_ball_temporal_observation(
+                data_dict, ball_temporal_cache, aggregator_kv_cache_list is not None,
+                aggregator_cache=aggregator_kv_cache_list,
+            )
         if aggregator_kv_cache_list is not None and t != 1:
             pass
         if self.emit_terminal_perception_tokens:
@@ -1519,11 +1656,15 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
 
             sky_token, affine_tokens, motion_tokens, time_tokens = None, None, None, None
             ball_token = None
+            ball_latents = None
             # 切片顺序必须与 aggregator 的 concat 顺序倒序一致：
             # concat 是 ... affine, sky, ball, patch，所以从尾巴切是 ball -> sky -> affine。
             if self.use_ball_token_intrunk:
                 ball_token = others_last_tokens[:, :, -1:]
                 ball_token = self.ball_token_norm(ball_token)  # NOTE: token need LayerNorm
+                ball_tokens_by_time = ball_token[:, :, 0].unflatten(1, (-1, v))
+                # Preserve terminal view slots for downstream policies, before pooling.
+                ball_latents = ball_token[:, -v:, 0, :]  # [b, v, 2*embed_dim]
                 # 球状态的监督目标是最后一个 context 帧（terminal），所以这里无条件
                 # 只取 terminal 那一帧的 v 个视图再跨视图平均 —— 与 sky_token 不同，
                 # sky 是全局属性可以对所有帧平均，球的位置逐帧都不一样，平均掉就没意义了。
@@ -1614,6 +1755,7 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
             pred_task_semantic = None
             ball_pos15 = None
             ball_v15 = None
+            ball_pos15_per_view = None
             if self.use_last_token:
                 # last layer's token
                 aggregated_last_tokens = last_tokens[:, :, self.patch_start_idx:]  # aggregated patch token
@@ -1659,6 +1801,20 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
                     _bo = self.ball_head_intrunk(ball_token.squeeze(1))   # [b, 6]
                     ball_pos15 = _bo[:, :3]
                     ball_v15 = _bo[:, 3:6]
+                    if self.ball_pos_supervision != "pooled":
+                        ball_pos15_per_view = self._forward_ball_position_views(
+                            ball_latents, aggregated_last_tokens
+                        )
+                    if self.ball_prefix_supervision or self.ball_temporal_refine:
+                        ball_readout_outputs = self._forward_ball_temporal_states(
+                            ball_tokens_by_time, aggregated_last_tokens,
+                            data_dict["context_time"], cache=ball_temporal_cache,
+                        )
+                        ball_pos15 = ball_readout_outputs["ball_pos15"]
+                        ball_v15 = ball_readout_outputs["ball_v15"]
+                        ball_latents = ball_readout_outputs["ball_latents"]
+                        if self.ball_pos_supervision != "pooled":
+                            ball_pos15_per_view = ball_readout_outputs["ball_pos15_per_view"]
             else:
                 # Gaussian head (Dpt head)
                 gs_dense_feats = self.gs_feature_head(output_list, images=rearrange(images, '(b t v) c h w -> b (t v) c h w', b=b, t=t, v=v), patch_start_idx=self.patch_start_idx)
@@ -1731,6 +1887,13 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
         if self.use_ball_token or self.use_ball_token_intrunk:
             output["ball_pos15"] = ball_pos15
             output["ball_v15"] = ball_v15
+        if self.use_ball_token_intrunk:
+            output["ball_latents"] = ball_latents
+            if self.ball_pos_supervision != "pooled":
+                output["ball_pos15_per_view"] = ball_pos15_per_view
+            if (getattr(self, "ball_prefix_supervision", False)
+                    or getattr(self, "ball_temporal_refine", False)):
+                output.update(ball_readout_outputs)
 
         output["aggregator_kv_cache_list"] = None
         output["camera_head_kv_cache_list"] = None

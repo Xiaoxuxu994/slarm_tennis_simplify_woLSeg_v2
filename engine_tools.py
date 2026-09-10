@@ -70,6 +70,11 @@ def build_model(args):
             ms3_physics_override=getattr(args, "ms3_physics_override", False),
             use_ball_token=getattr(args, "use_ball_token", False),
             use_ball_token_intrunk=getattr(args, "use_ball_token_intrunk", False),
+            ball_pos_supervision=getattr(args, "ball_pos_supervision", "pooled"),
+            ball_prefix_supervision=getattr(args, "ball_prefix_supervision", False),
+            ball_temporal_refine=getattr(args, "ball_temporal_refine", False),
+            ball_temporal_hidden_dim=getattr(args, "ball_temporal_hidden_dim", 256),
+            ball_temporal_num_heads=getattr(args, "ball_temporal_num_heads", 4),
             render_target_chunk_size=getattr(
                 args, "stream25_render_target_chunk_size", 20
             ),

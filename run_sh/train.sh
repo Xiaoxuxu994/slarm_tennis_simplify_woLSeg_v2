@@ -15,19 +15,24 @@ set -euo pipefail
 #   全部是 2 卡跑的，互相可比。改成别的卡数，跟这些的横比就不成立了。
 #   核实某次实验实际用了几张：
 #       grep "Global batch size" work_dirs/slarm/<exp_name>/logs/log.txt
-GPUS="0,1,2,3"
-CONFIG="configs/exp0908_001_slarm_stream25_0903_2k_triview_window6_nolseg_4gpu.yml"
-# ^ 0903_2k 全量微调（9/08）。四卡 = 全局 batch 4，是 6.5cm 那一系列（2 卡）的 2 倍，
-#   config 里的 lr 已按 sqrt(2) 缩放过（5.0e-5 -> 7.0e-5）。换卡数就要连 lr 一起换。
-#   ★ 开跑前五步全在 config 抬头：make_scene_list（--val-count 100）-> 核对注册
-#     -> check_dataset_contract（含 --visibility-summary）-> check_model_init
-#     -> ckpt_005999 上的 zero-shot 评测（不做这步，训完不知道涨了多少）。
+GPUS="${GPUS:-0,1,2,3}"
+CONFIG="${CONFIG:-configs/exp0910_004_balltoken_temporal_joint.yml}"
+# 默认：004 联合微调，直接运行 bash run_sh/train.sh。
+# 起点是已训练 ball-token 的 exp0908_003/ckpt_007999.pth；使用 load_from，
+# 不恢复旧 optimizer/步数，也不需要先跑 002 B 或 003 C。
+# 四卡、batch 1/卡、4000 steps；head LR 1e-5、trunk LR 1e-6。
+# 先在训练机核对旧权重：
+#   SLARM_SINGLE_PROCESS=1 python tools/check_model_init.py --config configs/exp0910_004_balltoken_temporal_joint.yml
+# 换四张卡：GPUS=4,5,6,7 bash run_sh/train.sh
+# 备用消融：CONFIG=configs/exp0910_005_balltoken_prefix_only.yml bash run_sh/train.sh
+# 权重位置不同：bash run_sh/train.sh --load_from /path/to/ckpt_007999.pth
+# 完整说明：docs/BALL_TEMPORAL_JOINT_FINETUNE.md
 # CONFIG="configs/slarm_stream25_24cm_triview_window6.yaml"
 
 # 断点续训：改成 1，其他什么都不用动（CONFIG/GPUS 保持和中断那次一致即可）。
 # ckpt 目录由 output_dir/project/exp_name 推出来，会自动挑最新的一个接着跑，
 # 权重/optimizer/loss_scaler/迭代数/采样器进度全部恢复，config 里的 load_from 会被忽略。
-RESUME=0
+RESUME="${RESUME:-0}"
 
 # ---- 6.5cm 实验组（起点统一为 exp0825_002 的 ckpt_039999）----
 #
@@ -147,6 +152,8 @@ DEVICE_NUM=$(awk -F',' '{print NF}' <<< "${GPUS}")
 
 export CUDA_VISIBLE_DEVICES="${GPUS}"
 export FEAT_DIST=1
+
+echo "[train] config=${CONFIG} gpus=${GPUS} resume=${RESUME}"
 
 # 渲染分块 stream25_render_target_chunk_size 由各 config 控制（不在此硬编码覆盖，
 # 否则命令行会盖过 YAML）；这里只开 TensorBoard。

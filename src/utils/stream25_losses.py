@@ -31,6 +31,9 @@ STREAM25_LOSS_WEIGHTS: Dict[str, float] = {
     # 之前所有实验的复现性不受影响。开法见 configs/exp0909_001_*。
     "ball_traj": 0.0,
     "landing": 0.0,
+    "ball_prefix_pos": 0.0,
+    "ball_prefix_vel": 0.0,
+    "ball_prefix_landing": 0.0,
 }
 
 STREAM25_MS3_SCALES = {"velocity": 5.0, "acceleration": 9.81, "jerk": 1.0}
@@ -449,6 +452,131 @@ def ball_trajectory_losses(
     return out
 
 
+def ball_position_supervision(
+    pooled_position: torch.Tensor,
+    target_position: torch.Tensor,
+    per_view_position: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Mean over batch, views and coordinates; every input view has the same rig GT."""
+    if per_view_position is None:
+        return F.smooth_l1_loss(pooled_position / BALL_POS_SCALE_METERS,
+                                target_position / BALL_POS_SCALE_METERS)
+    if (per_view_position.ndim != 3 or per_view_position.shape[1] == 0
+            or per_view_position.shape[0] != target_position.shape[0]
+            or per_view_position.shape[2] != 3):
+        raise ValueError("ball_pos15_per_view must have shape [B, V, 3] with V > 0")
+    truth = target_position[:, None, :].expand_as(per_view_position)
+    return F.smooth_l1_loss(per_view_position / BALL_POS_SCALE_METERS,
+                            truth / BALL_POS_SCALE_METERS)
+
+
+def ball_prefix_losses(
+    output: Dict[str, torch.Tensor],
+    *,
+    input_dict: Dict[str, torch.Tensor],
+    weights: Dict[str, float],
+    vel_scale: float,
+    catch_dt: Optional[float] = None,
+) -> Dict[str, torch.Tensor]:
+    """Supervise causal states at frames 6/9/12, excluding the terminal head.
+
+    Position uses every view's readout; velocity and landing use the shared
+    pooled state. Prefix weights (0.25, 0.5, 1.0) are normalized to sum to one.
+    Every landing prediction targets the same absolute catch time, not a
+    constant elapsed time after each prefix. No rendered-target labels enter
+    these losses, and zero weights leave the old loss dictionary unchanged.
+    """
+    names = ("ball_prefix_pos", "ball_prefix_vel", "ball_prefix_landing")
+    active = {name: float(weights.get(name, 0.0)) for name in names}
+    if any(not math.isfinite(value) or value < 0 for value in active.values()):
+        raise ValueError("ball prefix loss weights must be finite and nonnegative")
+    if not any(active.values()):
+        return {}
+    if not math.isfinite(vel_scale) or vel_scale <= 0:
+        raise ValueError("ball prefix vel_scale must be finite and positive")
+    if active["ball_prefix_landing"] and (
+        catch_dt is None or not math.isfinite(catch_dt) or catch_dt <= 0
+    ):
+        raise ValueError("ball_prefix_landing requires a finite positive catch_dt")
+
+    from src.dataset.stream25 import MS3_GRAVITY_RIG, STREAM25_CONTEXT_FRAMES
+
+    def required_tensor(mapping, key):
+        value = mapping.get(key)
+        if not isinstance(value, torch.Tensor):
+            raise ValueError(f"ball prefix supervision requires tensor '{key}'")
+        if not torch.isfinite(value).all():
+            raise ValueError(f"ball prefix supervision requires finite '{key}'")
+        return value
+
+    states = required_tensor(output, "ball_prefix_states")
+    view_positions = required_tensor(output, "ball_prefix_positions_per_view")
+    if (states.ndim != 3 or states.shape[0] == 0
+            or states.shape[1:] != (len(STREAM25_CONTEXT_FRAMES), 6)):
+        raise ValueError("ball_prefix_states must have shape [B, 6, 6] with B > 0")
+    batch, count, _ = states.shape
+    if (view_positions.ndim != 4 or view_positions.shape[:2] != (batch, count)
+            or view_positions.shape[2] == 0 or view_positions.shape[3] != 3):
+        raise ValueError("ball_prefix_positions_per_view must have shape [B, 6, V, 3] with V > 0")
+    positions_gt = required_tensor(input_dict, "ball_position_rig")
+    velocities_gt = required_tensor(input_dict, "ball_velocity_rig")
+    timestamps = required_tensor(input_dict, "ball_timestamp")
+    for name, value in (("ball_position_rig", positions_gt),
+                        ("ball_velocity_rig", velocities_gt)):
+        if value.shape != (batch, count, 3):
+            raise ValueError(f"{name} must have shape [B, 6, 3] for ball prefix supervision")
+    if timestamps.shape != (batch, count):
+        raise ValueError("ball_timestamp must have shape [B, 6] for ball prefix supervision")
+    if not (timestamps[:, 1:] > timestamps[:, :-1]).all():
+        raise ValueError("ball_timestamp must be strictly increasing for ball prefix supervision")
+
+    # Keep geometry and reductions in FP32 even when the head runs under AMP.
+    states = states.float()
+    view_positions = view_positions.to(device=states.device, dtype=torch.float32)
+    positions_gt = positions_gt.to(device=states.device, dtype=torch.float32)
+    velocities_gt = velocities_gt.to(device=states.device, dtype=torch.float32)
+    timestamps = timestamps.to(device=states.device, dtype=torch.float32)
+    frames = (6, 9, 12)
+    indices = [STREAM25_CONTEXT_FRAMES.index(frame) for frame in frames]
+    prefix_weights = states.new_tensor((0.25, 0.5, 1.0))
+    prefix_weights = prefix_weights / prefix_weights.sum()
+    selected_states = states[:, indices]
+    selected_positions_gt = positions_gt[:, indices]
+    selected_velocities_gt = velocities_gt[:, indices]
+    result: Dict[str, torch.Tensor] = {}
+
+    def record(name, prediction, truth, scale, unit):
+        residual = F.smooth_l1_loss(prediction / scale, truth / scale, reduction="none")
+        per_prefix = residual.flatten(start_dim=2).mean(dim=-1)
+        raw = (per_prefix * prefix_weights).sum(dim=1).mean()
+        result[f"stream25_{name}_raw"] = raw.detach()
+        result[f"stream25_{name}_loss"] = active[name] * raw
+        errors = (prediction - truth).norm(dim=-1).reshape(batch, len(frames), -1).mean(dim=-1)
+        result[f"stream25_{name}_l2_{unit}"] = (
+            (errors * prefix_weights).sum(dim=1).mean().detach()
+        )
+        for index, frame in enumerate(frames):
+            result[f"stream25_{name}_frame{frame}_l2_{unit}"] = errors[:, index].mean().detach()
+
+    if active["ball_prefix_pos"]:
+        selected_views = view_positions[:, indices]
+        truth = selected_positions_gt[:, :, None, :].expand_as(selected_views)
+        record("ball_prefix_pos", selected_views, truth, BALL_POS_SCALE_METERS, "m")
+    if active["ball_prefix_vel"]:
+        record("ball_prefix_vel", selected_states[..., 3:], selected_velocities_gt, vel_scale, "ms")
+    if active["ball_prefix_landing"]:
+        gravity = states.new_tensor(MS3_GRAVITY_RIG)
+        terminal_dt = states.new_full((batch, 1), float(catch_dt))
+        truth = ball_states_to_positions(
+            positions_gt[:, -1], velocities_gt[:, -1], terminal_dt, gravity
+        ).expand(batch, len(frames), 3)
+        elapsed = float(catch_dt) + timestamps[:, -1:] - timestamps[:, indices]
+        prediction = (selected_states[..., :3] + selected_states[..., 3:] * elapsed[..., None]
+                      + 0.5 * gravity * elapsed[..., None].square())
+        record("ball_prefix_landing", prediction, truth, BALL_POS_SCALE_METERS, "m")
+    return result
+
+
 def compute_stream25_loss(
     pred: Dict[str, torch.Tensor],
     target: Dict[str, torch.Tensor],
@@ -637,8 +765,15 @@ def compute_stream25_loss(
             _ts = float(_ts.detach().flatten()[0].item())
         _vel_scale = float((weights or {}).get("ball_vel_scale") or
                            ball_vel_scale_from_timespan(_ts))
-        ball_pos_loss = F.smooth_l1_loss(pos_pred / BALL_POS_SCALE_METERS,
-                                         pos_gt / BALL_POS_SCALE_METERS)
+        per_view_pos = output.get("ball_pos15_per_view")
+        ball_pos_loss = ball_position_supervision(pos_pred, pos_gt, per_view_pos)
+        if per_view_pos is not None:
+            view_errors = (per_view_pos.float() - pos_gt[:, None].float()).norm(dim=-1)
+            loss_dict["stream25_ball_pos_per_view_l2_m"] = view_errors.mean().detach()
+            for view_index in range(per_view_pos.shape[1]):
+                loss_dict[f"stream25_ball_pos_view{view_index}_l2_m"] = (
+                    view_errors[:, view_index].mean().detach()
+                )
         ball_vel_loss = F.smooth_l1_loss(vel_pred / _vel_scale, vel_gt / _vel_scale)
         loss_dict["stream25_ball_vel_scale"] = pos_pred.new_tensor(_vel_scale)
         loss_dict["stream25_ball_pos_raw"] = ball_pos_loss.detach()
@@ -667,6 +802,19 @@ def compute_stream25_loss(
                 weights=weights, catch_dt=catch_dt,
             )
         )
+
+    if any(float(weights.get(name, 0.0)) != 0.0 for name in (
+        "ball_prefix_pos", "ball_prefix_vel", "ball_prefix_landing"
+    )):
+        prefix_timespan = input_dict.get("timespan", 0.8)
+        if isinstance(prefix_timespan, torch.Tensor):
+            prefix_timespan = float(prefix_timespan.detach().flatten()[0].item())
+        prefix_vel_scale = float(weights.get("ball_vel_scale") or
+                                 ball_vel_scale_from_timespan(prefix_timespan))
+        loss_dict.update(ball_prefix_losses(
+            output, input_dict=input_dict, weights=weights,
+            vel_scale=prefix_vel_scale, catch_dt=catch_dt,
+        ))
 
     total = sum(v for k, v in loss_dict.items() if k.endswith("_loss") and k != "stream25_total_loss")
     loss_dict["stream25_total"] = total.detach()
