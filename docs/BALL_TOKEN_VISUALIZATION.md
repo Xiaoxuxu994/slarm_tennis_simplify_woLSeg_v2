@@ -41,7 +41,8 @@ output/ball_token_004_ckpt003999/
 | 文件 | 展示内容 | 正确解读 |
 | --- | --- | --- |
 | `overview.png` | 末帧预测轨迹、frame45 端点、各 prefix 的接球误差、末帧三目 cosine、latent PCA、增强量 | 状态和特征的联合诊断，不是 latent 高质量的证明 |
-| `attention_query_view*.png` | 指定 query view 的球 token，读取历史六帧三目 patches 的权重 | 新 temporal refiner 的 attention，不是原 aggregator 的完整 attention，更不是球定位概率 |
+| `attention_query_view*.png` | 指定 query view 的球 token，读取历史六帧三目 patches 的权重 | 默认 004 用 temporal refiner，baseline 用原 aggregator global attention；不是球定位概率 |
+| `attention_frame_view*.png` | 每列上方是输入 RGB，下方是同帧同视角 ball query 对 patches 的热图 | aggregator 模式生成；每列使用该帧自己的 query，不是同一个末帧 query |
 | `trajectory.mp4` | 随 frame0/3/6/9/12/15 更新预测；之后固定末帧状态做物理延续，旁边显示最近的真实观测 | frame15 后没有新 latent，也没有新图像输入 |
 | `tokens.npz` | `[6,3,1536]` raw/refined tokens、状态、GT、context RGB 和可选 attention | 无 pickle，可供离线绘图和进一步诊断 |
 | `metrics.json` | 每个 prefix 的位置/速度/接球点误差，单位 m、m/s | 单场景诊断，不替代 100 场景 acceptance 评测 |
@@ -51,7 +52,7 @@ output/ball_token_004_ckpt003999/
 - 动画默认播放 8 fps，独立于场景物理 fps；30 fps 数据相当于约 3.75 倍慢放，画面上会标明。全轨迹 GT 是离线诊断参考，不送入预测模块。
 - 004 的 frame6/9/12 是直接监督的早期状态；frame0/3 读出仍属诊断。视频可能暴露早期预测不稳定，这是模型输出，不能作为已校准的在线跟踪结果。
 - PCA 在每个场景内对 raw/refined 一起拟合一个投影，不使用 GT 标签。PCA 坐标不是物理坐标，不同场景或独立运行的 PCA 轴也不能直接比较。
-- attention 在全部可读历史、视图和 patches 上 softmax，再对 heads 平均。每张图的所有子图共用色标，子图标题的 mass 是该时刻/相机的权重和，没有对子图单独归一化。
+- attention 在模型实际可读的全部 keys 上 softmax，再对 heads 平均。aggregator 的 keys 包含 camera/register/ball 等特殊 tokens；图中只画 patch 部分，保留特殊 token 的质量，不把 patch 重新归一化到 1。temporal refiner 的 keys 则只有 patches。每张图的所有子图共用色标，子图标题的 mass 是该时刻/相机的 patch 权重和。
 - 静态 overview 重点呈现末帧预测；动画固定坐标范围包含全部 prefix 预测，早期离群预测可能使坐标范围变大，不会通过移动视窗伪装收敛。
 
 ## 3. 验证早期 token 的因果读取
@@ -70,16 +71,39 @@ frame6 query 只能读取 0/3/6，后续列显示 `Future: masked`，不展示�
 
 ## 4. 旧 baseline 也能可视化
 
+baseline 无需重训，直接使用原 config 和 checkpoint。以下命令只生成静态图，方便先确认热图：
+
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash run_sh/visualize_ball_tokens.sh \
   --config configs/exp0908_003_slarm_stream25_0903_2k_balltoken_intrunk_landing.yml \
   --checkpoint work_dirs/slarm/exp0908_003_slarm_stream25_0903_2k_balltoken_intrunk_landing/checkpoints/ckpt_007999.pth \
   --scene-indices 0,1,2 \
-  --output-dir output/ball_token_baseline_ckpt007999 \
-  --video mp4
+  --attention-source aggregator \
+  --attention-layer -1 \
+  --attention-frame 15 \
+  --output-dir output_vis/ball_token_baseline_ckpt007999_attn_v1 \
+  --video none
 ```
 
-旧 baseline、002 B、005 prefix-only 没有新 temporal refiner，因此不生成这组三目 attention 图，并明确输出 unavailable。旧 baseline 的早期状态是同一个末帧训练头在早期 latent 上的诊断读出，未做直接 prefix 监督。003 C 的图展示主输出使用的原 token，不把仅辅助位置分支中的增强当成实际导出的 latent。
+每个 `scene_0000/` 等目录中新增：
+
+```text
+attention_frame_view0.png    # 最直观：本视角 RGB 与热图上下对照，六列 f0/3/6/9/12/15
+attention_frame_view1.png
+attention_frame_view2.png
+attention_query_view0.png    # 指定时刻 view0 的 ball query 读取历史三视角
+attention_query_view1.png
+attention_query_view2.png
+```
+
+- `--attention-source auto` 是默认值：004 选择 temporal refiner，其余 in-trunk 模型选择 aggregator。004 也可显式选 `aggregator`，用于和 baseline 比较同一主干层。C 的 aggregator 图不是其辅助 position cross-attention 图。
+- `--attention-layer -1` 选最后一对 frame/global blocks。也可指定从 0 开始的层号，例如 `5`；不同层单独运行并使用不同输出目录。不能据最漂亮的一层宣称整体定位更好。
+- `--attention-frame 6` 让 global 图只读取 f0/3/6，其后列屏蔽。frame 图始终显示六帧各自 query 的本目读取，不受该选项筛选。
+- 提取复用该层实际输入、QKV 权重、Q/K norm、RoPE 和真实历史 K cache，只构造球 query 行的分数矩阵，不构造完整 patch-to-patch attention。当前支持单场景 `window_6` 的六次增量执行；布局或缓存不匹配会报错，不猜测时序。
+- 图像是模型实际输入的 RGB 分辨率，不是未经预处理的传感器原图。热图由 patch 网格插值叠加，无 GT mask、位置或速度参与生成。高权重不保证落在球上，低权重也不能单独证明球信息缺失；这是单层直接 attention，不是多层 rollout 或最终状态的因果归因。
+- NPZ 保存 `frame_attention[6,3,Ph,Pw]`、`attention[3,6,3,Ph,Pw]`、两种 special mass 以及实际层号，支持离线重画。**此前导出的 baseline NPZ 没有这些数据，必须重新提取一次**。
+
+旧 baseline 的早期状态是同一个末帧训练头在早期 latent 上的诊断读出，未做直接 prefix 监督。003 C 的状态/latent 图展示主输出使用的原 token，不把仅辅助位置分支中的增强当成实际导出的 latent。
 
 ## 5. 离线重画
 
@@ -94,14 +118,17 @@ python scripts/visualize_ball_tokens.py \
 
 离线模式只需要 NumPy、Matplotlib、ImageIO/Pillow；MP4 另外需要 `imageio-ffmpeg`。这些绘图/视频依赖已在仓库训练依赖中。`--video both` 同时生成 GIF/MP4，`--video none` 只画静态图。离线模式使用 NPZ 中已存的 attention query 时刻；更换 query 时刻必须重新提取。
 
+`trajectory.mp4` 是轨迹更新视频，不是热图动画，也不是 GS 渲染视频。使用 VS Code Remote 时，可在文件栏右键下载后用本地播放器查看；GIF 也可由 NPZ 离线生成。热图直接查看上述 PNG 即可。离线重画保留已存的 attention source/layer，不会因传入另一层号而重新计算。
+
 不需要 attention 时加 `--no-attention`。推理默认 BF16，可用 `--dtype float32` 做数值检查。脚本使用完整六帧因果前向并关闭目标图像渲染，仍会运行原 GS/MS3 heads，因此提取端仍需完整 SLARM 运行依赖。
 
 ## 6. 验证边界
 
 ```bash
 python -m pytest tests/scripts/test_visualize_ball_tokens.py \
+  tests/scripts/test_ball_token_viz_aggregator.py \
   tests/scripts/test_ball_token_viz_attention.py \
   tests/scripts/test_ball_token_viz_plot.py -q
 ```
 
-CPU 测试覆盖真实 temporal refiner 的 QK 与 SDPA 对照、因果 mask、BF16、hook 清理、状态与导出一致、checkpoint key 不匹配拒绝、NPZ 离线重画、物理时间换算及图像/视频输出。合成夹具只用于检查脚本和排版，不代表模型结果。本机无真实训练 checkpoint、数据和 CUDA renderer；真实场景的提取、耗时、显存和最终图像内容需训练机验证。
+CPU 测试覆盖真实 temporal refiner 和原 aggregator attention 层的 QK 与 SDPA 输入对照、RoPE、Q/K norm、因果 mask、真实层生成的 K cache、BF16、特殊 token 权重保留、hook 清理、状态与导出一致、checkpoint key 不匹配拒绝、NPZ 离线重画、物理时间换算及图像/视频输出。合成夹具只用于检查脚本和排版，不代表模型结果。本机无真实训练 checkpoint、数据和 CUDA renderer；真实场景的提取、耗时、显存和最终图像内容需训练机验证。

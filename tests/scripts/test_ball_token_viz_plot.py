@@ -9,6 +9,7 @@ from tools.ball_token_viz_plot import (
     _scene_title,
     _validate,
     render_attention,
+    render_frame_attention,
     render_overview,
     render_trajectory_animation,
 )
@@ -102,6 +103,23 @@ def test_attention_png(viz_data, tmp_path):
     path = render_attention(viz_data, tmp_path / "attention.png", query_view=1, dpi=40)
     assert path.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
     assert path.stat().st_size > 1000
+
+
+def test_aggregator_attention_and_original_image_panels(viz_data, tmp_path):
+    pytest.importorskip("matplotlib")
+    viz_data.update(attention_kind="aggregator_global", attention_layer=11,
+                    attention_special_mass=np.full(3, 0.2),
+                    frame_attention=np.full((6, 3, 3, 4), 0.8 / 12),
+                    frame_attention_special_mass=np.full((6, 3), 0.2))
+    viz_data["attention"] *= 0.8
+    for view in range(3):
+        for render, name, kwargs in ((render_attention, "global", {"query_view": view}),
+                                     (render_frame_attention, "frame", {"view": view})):
+            path = render(viz_data, tmp_path / f"{name}{view}.png", dpi=40, **kwargs)
+            assert path.stat().st_size > 1000
+    viz_data["frame_attention_special_mass"][0, 0] = 0
+    with pytest.raises(ValueError, match="sum to one"):
+        render_frame_attention(viz_data, tmp_path / "invalid.png")
 
 
 def test_attention_missing_rgb_fails(viz_data, tmp_path):

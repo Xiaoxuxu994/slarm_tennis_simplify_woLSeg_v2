@@ -271,6 +271,63 @@ def render_overview(data: Mapping[str, Any], out_path: PathLike, dpi: int = 150)
     return out_path
 
 
+def _overlay_attention(ax, rgb: np.ndarray, weights: np.ndarray, maximum: float):
+    height, width = rgb.shape[:2]
+    ax.imshow(rgb, interpolation="nearest")
+    return ax.imshow(
+        weights, cmap="magma", vmin=0, vmax=maximum,
+        alpha=0.8 * np.clip(weights / maximum, 0, 1), interpolation="bilinear",
+        extent=(-0.5, width - 0.5, height - 0.5, -0.5),
+    )
+
+
+def render_frame_attention(data: Mapping[str, Any], out_path: PathLike, view: int = 0,
+                           dpi: int = 150) -> Path:
+    """Compare RGB and original frame-block attention, with one shared scale."""
+    data = _validate(data)
+    times, views = len(data["frames"]), len(data["view_names"])
+    weights = np.asarray(data.get("frame_attention"), dtype=np.float64)
+    special = np.asarray(data.get("frame_attention_special_mass"), dtype=np.float64)
+    if data.get("rgb") is None or weights.ndim != 4 or weights.shape[:2] != (times, views):
+        raise ValueError("Frame attention requires rgb and [time, view, patch_height, patch_width] weights")
+    if (special.shape != (times, views) or not np.isfinite(special).all()
+            or not np.isfinite(weights).all() or np.any(weights < 0) or np.any(special < 0)
+            or not np.allclose(weights.sum((2, 3)) + special, 1, atol=1e-3, rtol=0)):
+        raise ValueError("Frame patch and special-token attention must be nonnegative and sum to one")
+    if not 0 <= view < views:
+        raise ValueError("view is outside the available views")
+    plt = _pyplot()
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with plt.rc_context({"font.family": "DejaVu Sans", "font.size": 9}):
+        fig, axes = plt.subplots(2, times, figsize=(18, 6.4), squeeze=False)
+        try:
+            fig.subplots_adjust(left=0.05, right=0.92, bottom=0.14, top=0.79, hspace=0.12, wspace=0.06)
+            maximum = max(float(weights.max()), 1e-12)
+            for step, frame in enumerate(data["frames"]):
+                rgb = data["rgb"][step, view]
+                axes[0, step].imshow(rgb)
+                axes[0, step].set_title(f"f{frame} | RGB")
+                heat = _overlay_attention(axes[1, step], rgb, weights[step, view], maximum)
+                axes[1, step].set_title(f"Patch mass {weights[step, view].sum():.1%}")
+                for row in range(2):
+                    axes[row, step].set_xticks([])
+                    axes[row, step].set_yticks([])
+            color_axis = fig.add_axes([0.94, 0.23, 0.012, 0.45])
+            fig.colorbar(heat, cax=color_axis).set_label("Mean attention weight per patch")
+            fig.suptitle(f"BALL TOKEN -> IMAGE PATCHES  |  {_scene_title(data)}",
+                         x=0.05, y=0.97, ha="left", fontsize=20, fontweight="semibold")
+            fig.text(0.05, 0.885, f"{data['view_names'][view]} | Frame block {data['attention_layer']} (zero-based) | "
+                     "Each column uses its own frame's ball query; heads averaged", fontsize=11)
+            fig.text(0.05, 0.065, "Original model Q/K + RoPE. Shared color scale across all frames/views. "
+                     "Remaining attention goes to special tokens; patches are not renormalized.", fontsize=9)
+            fig.text(0.05, 0.03, "High attention need not locate the ball. No GT mask or ball position is used to create the heatmap.", fontsize=9)
+            fig.savefig(out_path, dpi=dpi, facecolor="white")
+        finally:
+            plt.close(fig)
+    return out_path
+
+
 def render_attention(data: Mapping[str, Any], out_path: PathLike, query_view: int = 0,
                      dpi: int = 150) -> Path:
     """Overlay causal, head-averaged attention with one shared weight scale."""
@@ -292,8 +349,12 @@ def render_attention(data: Mapping[str, Any], out_path: PathLike, query_view: in
     future = data["frames"] > query_frame
     if np.any(attention[:, future] != 0):
         raise ValueError("Future attention weights must be exactly zero for every query view")
-    if not np.allclose(attention.sum(axis=(1, 2, 3, 4)), 1.0, atol=1e-3, rtol=0):
+    special = np.asarray(data.get("attention_special_mass", np.zeros(views)), dtype=np.float64)
+    if special.shape != (views,) or not np.isfinite(special).all() or np.any(special < 0):
+        raise ValueError("Special-token attention must be a finite nonnegative vector")
+    if not np.allclose(attention.sum(axis=(1, 2, 3, 4)) + special, 1.0, atol=1e-3, rtol=0):
         raise ValueError("Attention weights must sum to one for every query view")
+    is_aggregator = data.get("attention_kind") == "aggregator_global"
     plt = _pyplot()
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -315,9 +376,7 @@ def render_attention(data: Mapping[str, Any], out_path: PathLike, query_view: in
                         ax.text(0.5, 0.5, "Future: masked", transform=ax.transAxes,
                                 ha="center", va="center", fontsize=10, color="#58616b")
                     else:
-                        ax.imshow(rgb, interpolation="nearest")
-                        heat = ax.imshow(selected[time, view], cmap="magma", vmin=0, vmax=maximum,
-                                         alpha=0.62, interpolation="bilinear", extent=(-0.5, width - 0.5, height - 0.5, -0.5))
+                        heat = _overlay_attention(ax, rgb, selected[time, view], maximum)
                     ax.set_xticks([])
                     ax.set_yticks([])
                     label = "future" if future[time] else f"mass {selected[time, view].sum():.1%}"
@@ -329,12 +388,14 @@ def render_attention(data: Mapping[str, Any], out_path: PathLike, query_view: in
             colorbar.set_label("Mean attention weight per patch", fontsize=9)
             colorbar.formatter.set_powerlimits((-2, 2))
             colorbar.update_ticks()
-            fig.suptitle(f"TEMPORAL PATCH ATTENTION  |  {_scene_title(data)}",
+            title = f"AGGREGATOR GLOBAL BLOCK {data['attention_layer']}" if is_aggregator else "TEMPORAL PATCH ATTENTION"
+            fig.suptitle(f"{title}  |  {_scene_title(data)}",
                          x=0.085, y=0.96, ha="left", fontsize=20, fontweight="semibold")
             fig.text(0.085, 0.9, f"Query: {data['view_names'][query_view]} ball token at f{query_frame}  |  "
                      "Rows: key camera  |  Columns: observed frame", fontsize=11, color="#58616b")
-            fig.text(0.085, 0.065, "Attention is averaged over heads, with one shared scale across all panels. "
-                     "Mass is summed over the panel's patches; no panel-wise renormalization.", fontsize=9, color="#58616b")
+            fig.text(0.085, 0.065, "Heads averaged; shared scale across panels. No patch renormalization. "
+                     f"Special-token mass: {special[query_view]:.1%}. "
+                     + ("Block index is zero-based." if is_aggregator else ""), fontsize=9, color="#58616b")
             fig.text(0.085, 0.035, "These are module attention weights, not ball-location probabilities or a causal attribution of the prediction.",
                      fontsize=9, color="#58616b")
             fig.savefig(out_path, dpi=dpi, facecolor="white")

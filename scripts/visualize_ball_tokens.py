@@ -1,4 +1,4 @@
-"""Visualize in-trunk ball states, latents and optional temporal patch attention."""
+"""Visualize in-trunk ball states, latents and original/temporal patch attention."""
 from __future__ import annotations
 
 import argparse
@@ -38,6 +38,10 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--video", choices=("none", "gif", "mp4", "both"), default="mp4")
     parser.add_argument("--video-fps", type=float, default=8.0, help="playback fps, independent of scene fps")
     parser.add_argument("--attention-frame", type=int, choices=(0, 3, 6, 9, 12, 15), default=15)
+    parser.add_argument("--attention-source", choices=("auto", "aggregator", "temporal"), default="auto",
+                        help="auto: temporal refiner for 004; original aggregator otherwise")
+    parser.add_argument("--attention-layer", type=int, default=-1,
+                        help="aggregator frame/global block index, zero-based; -1 selects the last")
     parser.add_argument("--no-attention", action="store_true")
     parser.add_argument("--dtype", choices=("bfloat16", "float32"), default="bfloat16")
     parser.add_argument("--device", default="cuda")
@@ -72,7 +76,8 @@ def validate_checkpoint_behavior(checkpoint: dict, args: Any) -> dict:
     return verified
 
 
-def collect_ball_outputs(model: Any, prepared: dict, attention_frame: int | None) -> dict:
+def collect_ball_outputs(model: Any, prepared: dict, attention_frame: int | None, *,
+                         attention_source: str = "auto", attention_layer: int = -1) -> dict:
     """Capture only six causal ball readouts; leave model parameters and patches alone."""
     import torch
     from src.utils.frame_indices import normalize_frame_indices
@@ -88,13 +93,31 @@ def collect_ball_outputs(model: Any, prepared: dict, attention_frame: int | None
     if not torch.equal(frames, expected.expand_as(frames)):
         raise ValueError("Observations must be exactly frame0/3/6/9/12/15 for every view")
     captured: dict[str, Any] = {}
+    source = attention_source
+    if source == "auto":
+        source = "temporal" if getattr(model, "ball_temporal_refine", False) else "aggregator"
+    if source not in ("temporal", "aggregator"):
+        raise ValueError("Unknown attention source")
+    aggregator_capture = None
+    if attention_frame is not None:
+        if source == "temporal" and not getattr(model, "ball_temporal_refine", False):
+            raise ValueError("This checkpoint has no temporal refiner; use --attention-source aggregator")
+        if source == "aggregator":
+            from tools.ball_token_viz_aggregator import AggregatorAttentionCapture
+
+            height, width = prepared["context_image"].shape[-2:]
+            aggregator_capture = AggregatorAttentionCapture(
+                model.aggregator, steps=steps, views=views,
+                grid=(height // model.patch_size, width // model.patch_size),
+                query_step=attention_frame // 3, layer=attention_layer,
+            )
 
     def capture_raw(_module, _inputs, output):
         captured["raw_tensor"] = output.detach().reshape(batch, steps, views, -1)
 
     def capture_refined(module, inputs, output):
         captured["refined_tensor"] = output[0].detach()
-        if attention_frame is not None:
+        if attention_frame is not None and source == "temporal":
             from tools.ball_token_viz_attention import temporal_attention
 
             weights = temporal_attention(module, *inputs[:3], query_step=attention_frame // 3)
@@ -108,7 +131,11 @@ def collect_ball_outputs(model: Any, prepared: dict, attention_frame: int | None
     if getattr(model, "ball_temporal_refine", False):
         handles.append(model.ball_temporal.register_forward_hook(capture_refined))
     try:
-        output = model(prepared, render_targets=False)
+        if aggregator_capture is not None:
+            with aggregator_capture:
+                output = model(prepared, render_targets=False)
+        else:
+            output = model(prepared, render_targets=False)
         raw = captured["raw_tensor"]
         features = captured.get("refined_tensor", raw)
         states = output.get("ball_prefix_states")
@@ -132,6 +159,9 @@ def collect_ball_outputs(model: Any, prepared: dict, attention_frame: int | None
             result["per_view_pos"] = output["ball_prefix_positions_per_view"][0].detach().float().cpu().numpy()
         if "attention" in captured:
             result["attention"] = captured["attention"]
+            result["attention_kind"] = "temporal"
+        if aggregator_capture is not None:
+            result.update(aggregator_capture.result())
         return result
     finally:
         for handle in handles:
@@ -239,7 +269,9 @@ def load_scene_data(path: Path) -> dict:
 
 
 def render_scene(data: dict, directory: Path, cli: argparse.Namespace) -> dict:
-    from tools.ball_token_viz_plot import render_attention, render_overview, render_trajectory_animation
+    from tools.ball_token_viz_plot import (
+        render_attention, render_frame_attention, render_overview, render_trajectory_animation,
+    )
 
     directory.mkdir(parents=True, exist_ok=False)
     save_scene_data(data, directory / "tokens.npz")
@@ -249,6 +281,8 @@ def render_scene(data: dict, directory: Path, cli: argparse.Namespace) -> dict:
     if "attention" in data and not cli.no_attention:
         for view in range(len(data["view_names"])):
             render_attention(data, directory / f"attention_query_view{view}.png", query_view=view)
+            if "frame_attention" in data:
+                render_frame_attention(data, directory / f"attention_frame_view{view}.png", view=view)
     else:
         print("  Attention: unavailable/disabled; no synthetic attention is substituted.", flush=True)
     formats = ("gif", "mp4") if cli.video == "both" else (() if cli.video == "none" else (cli.video,))
@@ -322,7 +356,10 @@ def main(argv: list[str] | None = None) -> int:
             prepared, target = collate_and_prepare(sample, args, device)
             views = DATASET_DICT[sample["dataset_name"]]["camera_list"][args.num_max_cameras]
             with torch.inference_mode(), torch.autocast(device_type=device.type, dtype=dtype, enabled=dtype != torch.float32):
-                captured = collect_ball_outputs(model, prepared, None if cli.no_attention else cli.attention_frame)
+                captured = collect_ball_outputs(
+                    model, prepared, None if cli.no_attention else cli.attention_frame,
+                    attention_source=cli.attention_source, attention_layer=cli.attention_layer,
+                )
             data = make_scene_data(captured, prepared, target, args=args, scene_index=index,
                                    view_names=views, attention_frame=cli.attention_frame)
             data.update(config=run["config"], checkpoint=run["checkpoint"], exp_name=args.exp_name)

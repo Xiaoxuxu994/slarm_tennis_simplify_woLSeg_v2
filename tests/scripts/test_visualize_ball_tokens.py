@@ -25,11 +25,33 @@ from scripts.visualize_ball_tokens import (
 ROOT = Path(__file__).resolve().parents[2]
 
 
+class TinyAggregator(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        spec = importlib.util.spec_from_file_location("viz_native_attention", ROOT / "src/models/components/layers/attention.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.use_ball_token = True
+        self.patch_start_idx = 2
+        for name in ("frame_blocks", "global_blocks"):
+            block = torch.nn.Module()
+            block.attn = module.Attention(32, num_heads=4, qk_norm=True)
+            setattr(self, name, torch.nn.ModuleList([block]))
+        self.register_buffer("tokens", torch.randn(6, 3, 6, 32))
+
+    def forward(self):
+        cache = [None, None]
+        for step in range(6):
+            x = self.frame_blocks[0].attn(self.tokens[step], pos=None)
+            _, cache = self.global_blocks[0].attn(x.reshape(1, 18, 32), pos=None, kv_cache=cache)
+
+
 class TinyReadout(torch.nn.Module):
     def __init__(self, temporal):
         super().__init__()
         self.ball_temporal_refine = temporal
         self.patch_size = 4
+        self.aggregator = TinyAggregator()
         self.ball_token_norm = torch.nn.LayerNorm(32)
         self.ball_head_intrunk = torch.nn.Linear(32, 6)
         self.register_buffer("raw", torch.randn(1, 18, 1, 32))
@@ -42,6 +64,7 @@ class TinyReadout(torch.nn.Module):
             torch.nn.init.normal_(self.ball_temporal.out_proj.weight, std=0.03)
 
     def forward(self, prepared, render_targets):
+        self.aggregator()
         with torch.autocast(device_type=self.raw.device.type, enabled=False):
             return self._readout(prepared, render_targets)
 
@@ -104,8 +127,15 @@ def test_capture_actual_readout_and_optional_attention(prepared, temporal, autoc
         np.testing.assert_allclose(data["attention"].sum((1, 2, 3, 4)), 1, atol=1e-6)
         assert not model.ball_temporal._forward_hooks
     else:
-        assert "attention" not in data
+        assert data["attention_kind"] == "aggregator_global"
+        assert data["frame_attention"].shape == (6, 3, 2, 2)
+        assert data["attention"].shape == (3, 6, 3, 2, 2)
+        assert np.count_nonzero(data["attention"][:, 3:]) == 0
+        np.testing.assert_allclose(data["attention"].sum((1, 2, 3, 4)) + data["attention_special_mass"], 1, atol=1e-6)
+        np.testing.assert_allclose(data["frame_attention"].sum((2, 3)) + data["frame_attention_special_mass"], 1, atol=1e-6)
         np.testing.assert_array_equal(data["latents"], data["raw_latents"])
+    for blocks in (model.aggregator.frame_blocks, model.aggregator.global_blocks):
+        assert not blocks[0].attn._forward_pre_hooks
     assert not model.ball_token_norm._forward_hooks
     for name, value in model.state_dict().items():
         torch.testing.assert_close(value, before[name], rtol=0, atol=0)
@@ -122,6 +152,28 @@ def test_capture_hooks_are_removed_on_failure(prepared, monkeypatch):
         collect_ball_outputs(model, prepared[0], 15)
     assert not model.ball_temporal._forward_hooks
     assert not model.ball_token_norm._forward_hooks
+
+
+def test_baseline_can_disable_attention_and_004_can_select_aggregator(prepared):
+    with torch.inference_mode():
+        baseline = collect_ball_outputs(TinyReadout(False).eval(), prepared[0], None)
+        refined = collect_ball_outputs(TinyReadout(True).eval(), prepared[0], 0,
+                                       attention_source="aggregator", attention_layer=0)
+    assert "attention" not in baseline
+    assert refined["attention_kind"] == "aggregator_global"
+    assert np.count_nonzero(refined["attention"][:, 1:]) == 0
+    assert not np.allclose(refined["latents"], refined["raw_latents"])
+    with pytest.raises(ValueError, match="no temporal refiner"):
+        collect_ball_outputs(TinyReadout(False).eval(), prepared[0], 15, attention_source="temporal")
+
+
+def test_early_global_map_does_not_change_with_future_tokens(prepared):
+    model = TinyReadout(False).eval()
+    with torch.inference_mode():
+        before = collect_ball_outputs(model, prepared[0], 6)
+        model.aggregator.tokens[3:] += 100
+        after = collect_ball_outputs(model, prepared[0], 6)
+    np.testing.assert_array_equal(before["attention"], after["attention"])
 
 
 @pytest.fixture
@@ -170,6 +222,20 @@ def test_offline_cli_writes_plot_metrics_and_refuses_existing_run(scene_data, tm
     assert len(json.loads((output / "run.json").read_text())["scenes"]) == 1
     with pytest.raises(SystemExit):
         main(argv)
+
+
+def test_baseline_attention_survives_npz_and_offline_render(prepared, scene_data, tmp_path):
+    pytest.importorskip("matplotlib")
+    with torch.inference_mode():
+        captured = collect_ball_outputs(TinyReadout(False).eval(), prepared[0], 15)
+    scene_data.update(captured)
+    source = tmp_path / "tokens.npz"
+    save_scene_data(scene_data, source)
+    output = tmp_path / "baseline"
+    assert main(["--from-npz", str(source), "--output-dir", str(output), "--video", "none"]) == 0
+    for view in range(3):
+        for prefix in ("attention_frame_view", "attention_query_view"):
+            assert (output / "scene" / f"{prefix}{view}.png").stat().st_size > 1000
 
 
 @pytest.mark.parametrize("value", ["1,1", "-1", "", "0,x"])
