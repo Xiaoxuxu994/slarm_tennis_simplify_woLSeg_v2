@@ -4,6 +4,8 @@
 
 改动前后的架构图、因果窗口和 loss 图见 [Ball-token 对比图解](BALL_TEMPORAL_COMPARISON.md)。
 
+训练后的 token、轨迹、attention 热图和视频见 [Ball-token 可视化脚本](BALL_TOKEN_VISUALIZATION.md)。
+
 ## 本次组合
 
 | 项目 | 原 B | 联合版 004 |
@@ -167,4 +169,4 @@ python -m pytest tests/models/test_ball_temporal.py \
 
 CPU 测试通过不等于已完成真实 CUDA 训练验证。本地没有训练数据、权重和完整 CUDA renderer 环境，真实模型 checkpoint 前向、显存、吞吐和精度仍需训练机确认。
 
-本次未包含二维球心检测/三角化、背景配对一致性、球级 GS 重构、端点重参数化或可视化视频工具，避免把急需验证的微调扩成整套新系统。
+训练改动未包含二维球心检测/三角化、背景配对一致性、球级 GS 重构或端点重参数化。后续补充的独立可视化工具见上方链接，不改变训练路径。
