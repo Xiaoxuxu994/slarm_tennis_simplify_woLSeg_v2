@@ -1,0 +1,123 @@
+# Pure control for exp0910_004: ONE substantive change, stream25_ball_vel_scale.
+#
+# Why. record() in stream25_losses.py computes smooth_l1(pred/scale, gt/scale),
+# so a SMALLER scale means MORE weight. The velocity scale defaults to
+# ball_vel_scale_from_timespan(0.8) = 0.1 m / 0.3 s = 0.333, where 0.3 s is
+# frame 15 -> last rendered target (frame 24). But this dataset catches at
+# frame 45, so the real lever arm is (45-15)/30 = 1.005 s and the correct
+# scale is 0.1 m / 1.0 s = 0.1. Running at 0.333 down-weights velocity 3.33x.
+# The star note at stream25_losses.py:379 says to run this control FIRST.
+# exp0910_004 never set the key, so it trained with velocity down-weighted.
+#
+# Evidence this matters, from the four-checkpoint sweep of exp0910_004:
+#     v15 ms3        0.0949 -> 0.0975 -> 0.0988 -> 0.1008   monotonically WORSE
+#     rgb psnr      29.7727 -> 29.9029 -> 29.9242 -> 29.9461 monotonically better
+#     depth absrel   0.0768 -> 0.0756 -> 0.0750 -> 0.0750    monotonically better
+# Velocity degrades while reconstruction improves, on all four points, in
+# opposite directions. That is a multi-task weighting problem, not overfitting.
+#
+# Gradient magnitude warning. smooth_l1 is quadratic in this range, so the
+# gradient on velocity grows by (0.333/0.1)^2 = 11x, not 3.33x. Watch the
+# first 200 steps: stream25_ball_vel_raw should fall, not oscillate. If it
+# diverges, that is itself the answer and 0.2 is the fallback.
+#
+# The checkpoint interval also drops 1000 -> 250 (and keep_n_ckpts 4 -> 16).
+# That is a measurement change, not a training change: exp0910_004 had its
+# best velocity at its EARLIEST checkpoint (999), so the minimum lies
+# somewhere in [0, 999] and was never observed. 250 finds it.
+#
+# Read as: seed, data, load_from, LR schedule, every loss weight and every
+# architecture flag are byte-identical to exp0910_004. Any difference in
+# v15 belongs to the scale.
+#
+# Acceptance. v15 ms3 (pixel head) beats 0.0949 at some checkpoint, and
+# pos15 does not regress past 0.045. If velocity improves and position
+# holds, the scale was the problem and every structural experiment on top
+# of exp0910_004 was run on a miscalibrated baseline.
+model: "slarm"
+dataset: ["ball_catch_triview_0903_2k"]
+data_root: "data/slarm_data"
+input_size: [320,240]
+patch_size: 8
+embed_dim: 768
+depth: 12
+patch_embed: "conv"
+num_max_cameras: 3
+num_context_timesteps: 6
+num_target_timesteps: 7
+context_stride: 3
+timespan: 0.8
+mode: "window_6"
+stream25_catch_frame: 45
+stream25_ball_radius: 0.0325
+use_affine_token: true
+use_sky_token: true
+use_ms3_motion: true
+use_last_token: true
+shortcut_rgb: true
+add_patch_plucker_embed: true
+sigmoid_rgb: true
+num_motion_tokens: 0
+strict_data_loading: true
+enable_task_semantic_head: true
+terminal_context_extrapolation: true
+stream25_render_target_chunk_size: 7
+stream25_reconstruction_loss: true
+use_ball_token: false
+use_ball_token_intrunk: true
+ball_token_freeze_backbone: false
+ball_pos_supervision: "per_view"
+ball_prefix_supervision: true
+ball_temporal_refine: true
+ball_temporal_hidden_dim: 256
+ball_temporal_num_heads: 4
+stream25_ball_prefix_pos_weight: 0.25
+stream25_ball_prefix_vel_weight: 0.25
+stream25_ball_prefix_landing_weight: 0.25
+stream25_ball_pos_weight: 1
+stream25_ball_vel_weight: 1
+stream25_ball_vel_scale: 0.1
+stream25_rgb_weight: 1
+stream25_lpips_weight: 0.05
+stream25_ball_rgb_weight: 0.5
+stream25_depth_relative_weight: 1
+stream25_ball_depth_metric_weight: 0.5
+stream25_semantic_weight: 1
+stream25_ms3_ball_weight: 1
+stream25_ms3_static_weight: 0.25
+stream25_opacity_weight: 0.1
+stream25_ball_traj_weight: 0.5
+stream25_landing_weight: 1
+stream25_ms3_velocity_scale: 5
+stream25_ms3_acceleration_scale: 9.81
+stream25_ms3_jerk_scale: 1
+terminal_dynamic_velocity_threshold: 1
+stream25_semantic_class_weight_cap: 10
+online_feat: false
+enable_feat_loss: false
+feat_loss_coeff: 0
+stream25_lseg_feature_weight: 0
+enable_depth_loss: true
+enable_sky_opacity_loss: true
+enable_perceptual_loss: true
+perceptual_weight: 0.05
+perceptual_loss_start_iter: 0
+load_depth: true
+lr: 0.00001
+stream25_trunk_lr: 0.000001
+lr_sched: "cosine"
+min_lr: 1e-7
+warmup_iters: 200
+batch_size: 1
+seed: 20260910
+load_from: "work_dirs/slarm/exp0908_003_slarm_stream25_0903_2k_balltoken_intrunk_landing/checkpoints/ckpt_007999.pth"
+train_annotation: "scene_list/ball_catch_triview_0903_2k_train.txt"
+eval_annotation: "scene_list/ball_catch_triview_0903_2k_validation.txt"
+num_iterations: 4000
+ckpt_every_n_iters: 250
+vis_every_n_iters: 2000
+num_vis_samples: 2
+eval_every_n_iters: 50000
+keep_n_ckpts: 16
+project: "slarm"
+exp_name: "exp0911_001_vel_scale_control"
