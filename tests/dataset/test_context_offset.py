@@ -209,3 +209,127 @@ def test_catch_metric_is_registered_everywhere_it_is_aggregated():
     assert '("catch_position", "median")' in report
     compare = (ROOT / "tools" / "compare_evaluations.py").read_text()
     assert '"catch_position"' in compare
+
+
+# ---------------------------------------------------------------------------
+# StreamSession 的观测校验器
+#
+# 存在的理由：offset 9 的第一次 eval 在这里炸了 ——
+#     ValueError: Expected context frame 0, got [3]
+# 校验器把 (0,3,6,9,12,15) 写死在 __init__ 里，dataset 那边滑了窗它不认。
+#
+# 修法不是把校验关掉。窗口整体后移是允许的，窗口的**形状**不允许变，所以第一次
+# 观测确定本场景的 offset，之后每一步仍按契约的步长核对。下面四条把"原来能抓到
+# 的现在还能抓到"钉住：跳帧、乱序、重复帧，一条都不能漏。
+#
+# 方法体从 AST 里取出来单独跑，不用 import（stream_session 会一路拉到 gsplat）。
+# ---------------------------------------------------------------------------
+
+
+def _validate_observation_fn():
+    torch = pytest.importorskip("torch")
+    source = (ROOT / "src" / "models" / "stream_session.py").read_text()
+    tree = ast.parse(source)
+    cls = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef) and node.name == "StreamSession"
+    )
+    fn = next(
+        node for node in cls.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_validate_observation"
+    )
+    namespace = {"torch": torch}
+    exec(compile(ast.Module([fn], []), "<validate>", "exec"), namespace)
+    return namespace["_validate_observation"], torch
+
+
+class _Model:
+    ball_temporal_refine = True
+    ball_prefix_supervision = False
+    ball_velocity_residual = False
+    terminal_context_extrapolation = True
+    num_cams = 3
+
+
+class _Session:
+    """Only the attributes _validate_observation actually reads."""
+
+    def __init__(self):
+        self.model = _Model()
+        self.mode = "window"
+        self.window_size = 6
+        self.expected_context_frames = (0, 3, 6, 9, 12, 15)
+        self.num_streamed_observations = 0
+        self.context_frame_offset = None
+
+
+def _stream(validate, torch, frames):
+    """Feed frames one at a time exactly as forward_stream does."""
+    session = _Session()
+    image = torch.zeros(1, 1, 3, 3, 4, 4)
+    for frame in frames:
+        validate(session, {
+            "context_image": image,
+            "context_frame_idx": torch.tensor([[frame]] * 3),
+        })
+        session.num_streamed_observations += 1
+    return session
+
+
+@pytest.mark.parametrize("offset", [0, 3, 6, 9])
+def test_a_slid_window_streams_without_tripping_the_validator(offset):
+    """This is the assertion the offset-9 eval crash would have failed."""
+    validate, torch = _validate_observation_fn()
+    session = _stream(validate, torch, [f + offset for f in (0, 3, 6, 9, 12, 15)])
+    assert session.context_frame_offset == offset
+
+
+def test_a_skipped_frame_is_still_caught():
+    validate, torch = _validate_observation_fn()
+    with pytest.raises(ValueError):
+        _stream(validate, torch, [3, 6, 12, 15, 18, 21])
+
+
+def test_a_wrong_stride_is_still_caught():
+    validate, torch = _validate_observation_fn()
+    with pytest.raises(ValueError):
+        _stream(validate, torch, [3, 5, 7, 9, 11, 13])
+
+
+def test_a_repeated_frame_is_still_caught():
+    validate, torch = _validate_observation_fn()
+    with pytest.raises(ValueError):
+        _stream(validate, torch, [3, 3, 6, 9, 12, 15])
+
+
+def test_the_offset_is_fixed_by_the_first_observation_not_per_step():
+    """A window that slides mid-scene is a bug, not a slid window."""
+    validate, torch = _validate_observation_fn()
+    with pytest.raises(ValueError):
+        _stream(validate, torch, [3, 6, 9, 12, 15, 21])
+
+
+def test_a_window_starting_before_the_contract_is_refused():
+    validate, torch = _validate_observation_fn()
+    with pytest.raises(ValueError):
+        _stream(validate, torch, [-3, 0, 3, 6, 9, 12])
+
+
+def test_the_offset_resets_between_scenes():
+    """_clear_cache must reset it, or scene two inherits scene one's window."""
+    source = (ROOT / "src" / "models" / "stream_session.py").read_text()
+    tree = ast.parse(source)
+    cls = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef) and node.name == "StreamSession"
+    )
+    clear = next(
+        node for node in cls.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_clear_cache"
+    )
+    assert "context_frame_offset = None" in ast.unparse(clear)
+    init = next(
+        node for node in cls.body
+        if isinstance(node, ast.FunctionDef) and node.name == "__init__"
+    )
+    assert "self.clear()" in ast.unparse(init), "__init__ must go through clear()"

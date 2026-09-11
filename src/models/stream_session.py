@@ -16,6 +16,9 @@ class StreamSession:
         self.camera_head_kv_cache_depth = self.model.camera_head.trunk_depth if self.model.camera_head is not None else 0
         self.camera_head_iterations = 4 if self.model.camera_head is not None else 0
         self.window_size = window_size
+        # 冻结契约的**形状**（六次、步长 3、递增）。绝对帧号由第一次观测确定 ——
+        # 见 _validate_observation：评测可以把整个窗口后移（--context-offset），
+        # 那时到达的是 (3,6,...,18) 或 (9,12,...,24)，形状不变、只是整体平移。
         self.expected_context_frames = (
             (0, 3, 6, 9, 12, 15)
             if (
@@ -133,6 +136,8 @@ class StreamSession:
         self.num_streamed_observations = 0
         self.streamed_context = {}
         self.ball_temporal_cache = None
+        # 由本场景第一次观测确定，clear() 之后重新确定。
+        self.context_frame_offset = None
 
     def _append_streamed_context(self, input_dict):
         for key, value in input_dict.items():
@@ -170,7 +175,21 @@ class StreamSession:
         if not isinstance(frame_idx, torch.Tensor) or frame_idx.numel() == 0:
             pass
         values = {int(value) for value in frame_idx.detach().cpu().reshape(-1).tolist()}
-        expected = self.expected_context_frames[self.num_streamed_observations]
+        # 窗口整体后移是允许的（评测的 --context-offset），窗口的**形状**不允许变。
+        # 第一次观测确定这一整个场景的 offset，之后每一步都按契约的步长核对，所以
+        # 跳帧、乱序、重复帧、步长错——原来能抓到的，现在一样能抓到。
+        if self.num_streamed_observations == 0 and len(values) == 1:
+            first = next(iter(values))
+            offset = first - self.expected_context_frames[0]
+            if offset < 0:
+                if strict_ball:
+                    raise ValueError(
+                        f"Context window starts before the contract: got frame {first}"
+                    )
+            else:
+                self.context_frame_offset = offset
+        offset = self.context_frame_offset or 0
+        expected = self.expected_context_frames[self.num_streamed_observations] + offset
         if values != {expected}:
             if strict_ball:
                 raise ValueError(f"Expected context frame {expected}, got {sorted(values)}")
