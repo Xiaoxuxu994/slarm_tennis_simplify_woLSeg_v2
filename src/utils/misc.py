@@ -559,6 +559,9 @@ def load_model(args, model_without_ddp, optimizer=None, loss_scaler=None):
             if getattr(args, "stream25_reconstruction_loss", False):
                 validate_stream25_checkpoint_contract(checkpoint, args, role="resume")
 
+            from src.utils.ball_residual_checkpoint import validate_residual_checkpoint
+            validate_residual_checkpoint(checkpoint["model"], model_without_ddp.state_dict(), args,
+                                         checkpoint.get("args"))
             msg = model_without_ddp.load_state_dict(checkpoint["model"], strict=True)
             logger.info(f"[Model-resume] Loaded model: {msg}")
             checkpoint_loaded = True
@@ -613,6 +616,9 @@ def load_model(args, model_without_ddp, optimizer=None, loss_scaler=None):
         if camera_report.get("message"):
             logger.info("[Model-init] %s", camera_report["message"])
 
+        from src.utils.ball_residual_checkpoint import validate_residual_checkpoint
+        validate_residual_checkpoint(checkpoint_state, model_without_ddp.state_dict(), args,
+                                     checkpoint.get("args"))
         msg = model_without_ddp.load_state_dict(checkpoint_state, strict=False)
         allowed_missing_prefixes = ("task_semantic_pred.",)
         forbidden_missing = [
@@ -629,6 +635,8 @@ def load_model(args, model_without_ddp, optimizer=None, loss_scaler=None):
         del checkpoint
 
     if not checkpoint_loaded:
+        if getattr(args, "ball_velocity_residual", False):
+            raise ValueError("Frozen residual experiment requires a pretrained baseline checkpoint")
         logger.info(f"Training from scratch. No checkpoint found.")
     return vis_slice_id
 

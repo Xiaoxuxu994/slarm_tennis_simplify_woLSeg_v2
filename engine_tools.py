@@ -75,6 +75,12 @@ def build_model(args):
             ball_temporal_refine=getattr(args, "ball_temporal_refine", False),
             ball_temporal_hidden_dim=getattr(args, "ball_temporal_hidden_dim", 256),
             ball_temporal_num_heads=getattr(args, "ball_temporal_num_heads", 4),
+            ball_velocity_residual=getattr(args, "ball_velocity_residual", False),
+            ball_velocity_history=getattr(args, "ball_velocity_history", True),
+            ball_velocity_hidden_dim=getattr(args, "ball_velocity_hidden_dim", 256),
+            ball_velocity_only_train=getattr(args, "ball_velocity_only_train", False),
+            ball_velocity_use_time=getattr(args, "ball_velocity_use_time", True),
+            ball_velocity_use_difference=getattr(args, "ball_velocity_use_difference", True),
             render_target_chunk_size=getattr(
                 args, "stream25_render_target_chunk_size", 20
             ),

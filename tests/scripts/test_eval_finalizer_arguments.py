@@ -3,6 +3,7 @@
 import ast
 import inspect
 import json
+import math
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -24,7 +25,8 @@ def test_finalizer_accepts_fit_frames_and_writes_json(tmp_path, monkeypatch, fit
     gates = {"scope_reports": {"aggregate": {"metrics": {}, "valid_counts": {}}},
              "gates": {}, "missing_gates": [], "all_gates_pass": True, "worst_ratio": 0}
     env = {"summarize_stream25_scene_results": lambda scenes: gates,
-           "TIME_BUCKETS": {}, "_json_safe": lambda value: value, "json": json}
+           "TIME_BUCKETS": {}, "_json_safe": lambda value: value, "json": json,
+           "STREAM25_CONTEXT_FRAMES": (0, 3, 6, 9, 12, 15), "math": math}
     exec(compile(ast.Module(body=[fn], type_ignores=[]), str(SOURCE), "exec"), env)
     finalizer = env[fn.name]
     # Check every production call's keyword names, including future additions.
@@ -40,3 +42,15 @@ def test_finalizer_accepts_fit_frames_and_writes_json(tmp_path, monkeypatch, fit
     )
     assert result["balltoken_fit_frames"] == fit_frames
     assert json.loads(output.read_text())["balltoken_fit_frames"] == fit_frames
+    scenes = [dict(scene_index=i, records=[], considered_frame_eyes=0, visible_ball_frame_eyes=0,
+                   velocity_residual={"delta_magnitude": float(i), "cosine": 0.5,
+                                      "cosine_valid": float(i > 0), "final_frame45_hit": float(i > 0)})
+              for i in range(3)]
+    result = finalizer(
+        scenes, split="validation", checkpoint_path="test.pth", config_path="test.yml",
+        manifest="test.txt", evaluation_seed=0, reference=False,
+        output_json=str(output), output_markdown=None, balltoken_fit_frames=fit_frames,
+    )
+    assert result["velocity_residual"]["delta_magnitude"]["median"] == 1
+    assert result["velocity_residual"]["cosine"]["n_valid"] == 2
+    assert result["velocity_residual"]["final_frame45_hit"]["mean"] == pytest.approx(2 / 3)

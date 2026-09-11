@@ -65,7 +65,9 @@ def validate_checkpoint_behavior(checkpoint: dict, args: Any) -> dict:
         raise ValueError("Checkpoint has no saved args; its training/supervision mode cannot be verified")
     defaults = {"use_ball_token_intrunk": False, "use_ball_token": False,
                 "ball_pos_supervision": "pooled", "ball_prefix_supervision": False,
-                "ball_temporal_refine": False}
+                "ball_temporal_refine": False, "ball_velocity_residual": False,
+                "ball_velocity_history": True, "ball_velocity_use_time": True,
+                "ball_velocity_use_difference": True}
     verified = {}
     for key, default in defaults.items():
         old = recorded.get(key, default) if isinstance(recorded, dict) else getattr(recorded, key, default)

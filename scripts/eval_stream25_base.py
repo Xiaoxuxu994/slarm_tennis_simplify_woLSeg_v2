@@ -1158,6 +1158,15 @@ def compute_stream25_scene_metrics(
     # 只有带内建 ball token 的模型才多出这个键，模型没有时 evaluation.json 与改动前逐字节一致。
     if balltoken_metrics:
         scene_result["balltoken"] = balltoken_metrics
+    if predictions.get("ball_v15_residual") is not None:
+        from src.utils.ball_residual_diagnostics import residual_diagnostics
+        diagnostics = residual_diagnostics(
+            predictions["ball_v15_base"], predictions["ball_v15_residual"], predictions["ball_v15"],
+            data_dict["ball_velocity_rig"][:, terminal_frame].to(predictions["ball_v15"]),
+            predictions["ball_pos15"],
+            data_dict["ball_position_rig"][:, terminal_frame].to(predictions["ball_pos15"]),
+            dt24=dt, dt45=(45 - terminal_frame) * float(timespan) / 24)
+        scene_result["velocity_residual"] = {key: float(value[0]) for key, value in diagnostics.items()}
     return scene_result
 
 
@@ -1544,6 +1553,20 @@ def _finalize_and_write(
             "ball_token_pos15_v15_gravity_extrapolation_rig"
         )
 
+    result = _json_safe(result)
+    residual_scenes = [scene["velocity_residual"] for scene in scene_results if "velocity_residual" in scene]
+    if residual_scenes:
+        import numpy as np
+        result["velocity_residual"] = {}
+        for key in residual_scenes[0]:
+            values = [scene[key] for scene in residual_scenes
+                      if math.isfinite(scene[key]) and (key != "cosine" or scene["cosine_valid"] > 0)]
+            result["velocity_residual"][key] = {
+                "median": float(np.median(values)) if values else None,
+                "p95": float(np.percentile(values, 95)) if values else None,
+                "mean": float(np.mean(values)) if values else None,
+                "n_valid": len(values), "n_total": len(scene_results),
+            }
     result = _json_safe(result)
     if output_json:
         with open(output_json, "w") as f:

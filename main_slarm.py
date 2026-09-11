@@ -283,6 +283,13 @@ def get_args_parser():
                         help="Refine ball tokens from causal historical patches on the MAIN output path")
     parser.add_argument("--ball_temporal_hidden_dim", type=int, default=256)
     parser.add_argument("--ball_temporal_num_heads", type=int, default=4)
+    parser.add_argument("--ball_velocity_residual", action="store_true")
+    parser.add_argument("--ball_velocity_history", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--ball_velocity_hidden_dim", type=int, default=256)
+    parser.add_argument("--ball_velocity_only_train", action="store_true")
+    parser.add_argument("--ball_velocity_use_time", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--ball_velocity_use_difference", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--stream25_ball_delta_v_weight", type=float, default=0.0)
     parser.add_argument("--stream25_ball_prefix_pos_weight", type=float, default=0.0)
     parser.add_argument("--stream25_ball_prefix_vel_weight", type=float, default=0.0)
     parser.add_argument("--stream25_ball_prefix_landing_weight", type=float, default=0.0)
@@ -712,6 +719,18 @@ def main(args):
     logger.info(f"Dataset {args.dataset} contains {len(dataset_train):,} training sequences in total.")
 
     model = build_model(args)
+
+    if getattr(args, "ball_velocity_only_train", False):
+        if any(getattr(args, f"stream25_ball_prefix_{name}_weight", 0) != 0
+               for name in ("pos", "vel", "landing")):
+            raise ValueError("Frozen residual experiment does not permit prefix supervision")
+        if getattr(args, "ball_token_freeze_backbone", False):
+            raise ValueError("Do not combine velocity-only and legacy ball-token freezing")
+        trainable = [name for name, p in model.named_parameters() if p.requires_grad]
+        if not trainable or any(not name.startswith("ball_velocity_head.") for name in trainable):
+            raise RuntimeError("Velocity probe must train only ball_velocity_head parameters")
+        logger.info("[ball_velocity_only_train] Frozen baseline; trainable parameters: "
+                    + ", ".join(trainable))
 
     # 两阶段训练可选：冻结 backbone，只训 ball token 相关参数。
     # 必须在构建 optimizer 之前执行，否则冻结不生效。

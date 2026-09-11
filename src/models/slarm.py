@@ -34,6 +34,7 @@ else:
 from .decoder import ConvDecoder, DummyDecoder, ModulatedLinearLayer
 from .layers import Block, LayerNorm2d, Mlp
 from .ball_temporal import BallTemporalRefiner
+from .ball_velocity_residual import BallVelocityResidual
 from .components.aggregator.aggregator import Aggregator
 from .components.heads.camera_head import CameraHead
 from .components.heads.dpt_head import DPTHead
@@ -187,6 +188,12 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
         ball_temporal_refine=False,
         ball_temporal_hidden_dim=256,
         ball_temporal_num_heads=4,
+        ball_velocity_residual=False,
+        ball_velocity_history=True,
+        ball_velocity_hidden_dim=256,
+        ball_velocity_only_train=False,
+        ball_velocity_use_time=True,
+        ball_velocity_use_difference=True,
         # stream
         mode="full", #  default use full attention
         **kwargs,
@@ -281,7 +288,15 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
         self.ball_pos_supervision = ball_pos_supervision
         self.ball_prefix_supervision = bool(ball_prefix_supervision)
         self.ball_temporal_refine = bool(ball_temporal_refine)
-        if self.ball_prefix_supervision or self.ball_temporal_refine:
+        self.ball_velocity_residual = bool(ball_velocity_residual)
+        self.ball_velocity_only_train = bool(ball_velocity_only_train)
+        if self.ball_velocity_only_train and not self.ball_velocity_residual:
+            raise ValueError("Velocity-only training requires the residual head")
+        if self.ball_velocity_residual and not self.ball_velocity_only_train:
+            raise ValueError("History-motion residual experiment requires a frozen baseline")
+        if self.ball_velocity_residual and (self.ball_temporal_refine or self.ball_prefix_supervision):
+            raise ValueError("Velocity residual ablation must not combine temporal/prefix experiments")
+        if self.ball_prefix_supervision or self.ball_temporal_refine or self.ball_velocity_residual:
             if (not use_ball_token_intrunk or use_ball_token or not use_last_token
                     or not terminal_context_extrapolation or mode != "window_6"):
                 raise ValueError("Temporal ball readout requires in-trunk only, use_last_token, "
@@ -474,6 +489,10 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
             if self.use_ball_token_intrunk:
                 self.ball_token_norm = nn.LayerNorm(2 * embed_dim)
                 self.ball_head_intrunk = Mlp(2 * embed_dim, 2 * embed_dim, 6)  # pos3 + vel3
+                if getattr(self, "ball_velocity_residual", False):
+                    self.ball_velocity_head = BallVelocityResidual(
+                        2 * embed_dim, ball_velocity_hidden_dim, ball_velocity_history,
+                        ball_velocity_use_time, ball_velocity_use_difference)
                 if self.ball_pos_supervision == "per_view_cross":
                     self.ball_pos_cross = Block(dim=2 * embed_dim, num_heads=16, use_cross_attn=True)
                     # Start C as B: both residual branches initially contribute zero.
@@ -581,6 +600,17 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
             if self.add_camera_embed:
                 self.aggregator.pose_encoding_mlp = zero_module(self.aggregator.pose_encoding_mlp)
 
+        if self.ball_velocity_only_train:
+            for name, parameter in self.named_parameters():
+                parameter.requires_grad_(name.startswith("ball_velocity_head."))
+
+    def train(self, mode=True):
+        super().train(mode)
+        if getattr(self, "ball_velocity_only_train", False):
+            for name, child in self.named_children():
+                child.train(mode if name == "ball_velocity_head" else False)
+        return self
+
     def init_weights(self):
         def _basic_init(module):
             if isinstance(module, nn.Linear):
@@ -598,6 +628,9 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
         if hasattr(self, "ball_temporal"):
             nn.init.zeros_(self.ball_temporal.out_proj.weight)
             nn.init.zeros_(self.ball_temporal.out_proj.bias)
+        if hasattr(self, "ball_velocity_head"):
+            nn.init.zeros_(self.ball_velocity_head.out_proj.weight)
+            nn.init.zeros_(self.ball_velocity_head.out_proj.bias)
 
     def load_pretrained_vggt(self, vggt_ckpts_filepath=''):
         vggt_pretrained_weight = torch.load(vggt_ckpts_filepath)
@@ -1532,7 +1565,7 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
 
     def _forward_ball_temporal_states(
         self, ball_tokens: Tensor, patch_tokens: Tensor, context_time: Tensor,
-        cache=None,
+        cache=None, velocity_times_seconds=None, view_valid=None,
     ) -> dict:
         """Use the same refined features for state losses, inference and export."""
         b, t, v, c = ball_tokens.shape
@@ -1555,6 +1588,15 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
         states = torch.stack([
             self.ball_head_intrunk(ball_tokens[:, step].mean(dim=1)) for step in range(t)
         ], dim=1)
+        if getattr(self, "ball_velocity_residual", False):
+            if velocity_times_seconds is None:
+                raise ValueError("Residual velocity readout requires explicit observation times in seconds")
+            residual, velocity_cache = self.ball_velocity_head(
+                ball_tokens.detach(), velocity_times_seconds, cache, view_valid=view_valid)
+            result["ball_temporal_cache"] = velocity_cache
+            result["ball_v15_base"] = states[:, -1, 3:].detach()
+            result["ball_v15_residual"] = residual[:, -1]
+            states = torch.cat((states[..., :3].detach(), states[..., 3:].detach() + residual), dim=-1)
         result["ball_pos15"] = states[:, -1, :3]
         result["ball_v15"] = states[:, -1, 3:]
         result["ball_latents"] = ball_tokens[:, -1]
@@ -1566,7 +1608,7 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
                 result["ball_pos15_per_view"] = positions[:, -1]
             if self.ball_prefix_supervision:
                 result["ball_prefix_positions_per_view"] = positions
-        if self.ball_prefix_supervision:
+        if self.ball_prefix_supervision or getattr(self, "ball_velocity_residual", False):
             result["ball_prefix_states"] = states
         return result
 
@@ -1622,7 +1664,7 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
             start = time.time()
         images = data_dict["context_image"]
         b, t, v, c, h, w = images.size()
-        if self.ball_temporal_refine:
+        if self.ball_temporal_refine or self.ball_velocity_residual:
             self._validate_ball_temporal_observation(
                 data_dict, ball_temporal_cache, aggregator_kv_cache_list is not None,
                 aggregator_cache=aggregator_kv_cache_list,
@@ -1808,10 +1850,23 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
                         ball_pos15_per_view = self._forward_ball_position_views(
                             ball_latents, aggregated_last_tokens
                         )
-                    if self.ball_prefix_supervision or self.ball_temporal_refine:
+                    if self.ball_prefix_supervision or self.ball_temporal_refine or self.ball_velocity_residual:
+                        velocity_kwargs = {}
+                        if getattr(self, "ball_velocity_residual", False):
+                            ct = data_dict["context_time"]
+                            if ct.ndim == 3 and not torch.allclose(ct, ct[..., :1].expand_as(ct)):
+                                raise ValueError("Residual velocity readout requires synchronized view times")
+                            seconds = ct[..., 0] if ct.ndim == 3 else ct
+                            span = torch.as_tensor(data_dict["timespan"], device=seconds.device,
+                                                   dtype=seconds.dtype)
+                            if span.numel() == b:
+                                span = span.reshape(b, 1)
+                            velocity_kwargs = dict(velocity_times_seconds=seconds * span,
+                                                   view_valid=data_dict.get("context_view_valid"))
                         ball_readout_outputs = self._forward_ball_temporal_states(
                             ball_tokens_by_time, aggregated_last_tokens,
                             data_dict["context_time"], cache=ball_temporal_cache,
+                            **velocity_kwargs,
                         )
                         ball_pos15 = ball_readout_outputs["ball_pos15"]
                         ball_v15 = ball_readout_outputs["ball_v15"]
@@ -1895,7 +1950,8 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
             if self.ball_pos_supervision != "pooled":
                 output["ball_pos15_per_view"] = ball_pos15_per_view
             if (getattr(self, "ball_prefix_supervision", False)
-                    or getattr(self, "ball_temporal_refine", False)):
+                    or getattr(self, "ball_temporal_refine", False)
+                    or getattr(self, "ball_velocity_residual", False)):
                 output.update(ball_readout_outputs)
 
         output["aggregator_kv_cache_list"] = None
