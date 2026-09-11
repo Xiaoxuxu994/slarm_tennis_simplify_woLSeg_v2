@@ -26,6 +26,16 @@ KEY_METRICS: List[Tuple[str, str, List[Tuple[str, str]], Optional[str]]] = [
     ("frame24 balltoken med / p95",   "down", [("frame24_position_balltoken", "median"), ("frame24_position_balltoken", "p95")], None),
     ("balltoken pos15 med / p95",     "down", [("ball_pos15_error", "median"), ("ball_pos15_error", "p95")], None),
     ("balltoken vel15 med / p95",     "down", [("ball_vel15_error", "median"), ("ball_vel15_error", "p95")], None),
+    # 多帧弹道拟合读出：用历史位置 + 已知重力反解 (pos15, v15)，代替 head 直接回归速度。
+    # 只在 ball_prefix_supervision 打开的 ckpt 上有值。与上面三行并排看：
+    #   fit 的 vel15 明显更好而 pos15 持平 -> 直接回归速度是瓶颈，应换成拟合读出。
+    #   两者都没变好 -> 位置的逐帧误差本身就是瓶颈，拟合救不了。
+    ("balltoken fit frame24 med / p95", "down", [("frame24_position_balltoken_fit", "median"), ("frame24_position_balltoken_fit", "p95")], None),
+    ("balltoken fit pos15 med / p95",   "down", [("ball_pos15_error_balltoken_fit", "median"), ("ball_pos15_error_balltoken_fit", "p95")], None),
+    ("balltoken fit vel15 med / p95",   "down", [("ball_vel15_error_balltoken_fit", "median"), ("ball_vel15_error_balltoken_fit", "p95")], None),
+    # 逐 prefix 帧的位置误差。决定拟合该用几帧 —— 早期帧劣化超过后期约 1.6 倍时，
+    # 缩短时间跨度的代价就盖过去掉坏样本的好处（见 stream25_metrics.fit_ballistic_state）。
+    ("balltoken prefix pos f0 / f15",   "down", [("ball_prefix_pos_error_frame0", "median"), ("ball_pos15_error", "median")], None),
     ("ball velocity med / p95",       "down", [("ms3_ball_velocity", "median"), ("ms3_ball_velocity", "p95")], "ms3_ball_velocity"),
     ("ball acceleration med / p95",   "down", [("ms3_ball_acceleration", "median"), ("ms3_ball_acceleration", "p95")], "ms3_ball_acceleration"),
     ("ball jerk med / p95",           "down", [("ms3_ball_jerk", "median"), ("ms3_ball_jerk", "p95")], "ms3_ball_jerk"),

@@ -59,6 +59,12 @@ echo "out:    ${OUT_DIR}"
 echo "GPU:    ${GPUS}"
 echo ""
 
+# ball token 的多帧弹道拟合读出（frame24_position_balltoken_fit 等）默认就会算，
+# 只要 ckpt 带 ball_prefix_supervision；不带的 ckpt 上这些行显示 n/a，不影响其他指标。
+# 想改用哪几帧拟合，追加参数即可（"$@" 会透传下去）：
+#     bash run_sh/eval.sh --balltoken-fit-frames 3,6,9,12,15
+# ★ 默认用全部 6 帧。少用帧会缩短时间基线，0.50s -> 0.30s 让拟合速度差 1.87 倍，
+#   足以输给直接回归。只在 ball_prefix_pos_error_frame0 比 pos15 差 1.6 倍以上时才砍。
 bash run_sh/eval_stream25_base.sh \
     --config "${CONFIG}" \
     --checkpoint "${CKPT}" \

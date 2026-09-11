@@ -97,7 +97,12 @@ def test_no_top_level_function_references_an_unresolvable_name():
     _finalize_and_write 里，闭包不成立。逐个函数检查自由变量是否可解析，
     比逐个补端到端测试便宜得多。
     """
-    tree = ast.parse(EVAL_SRC.read_text(encoding="utf-8"))
+    source = EVAL_SRC.read_text(encoding="utf-8")
+    # ★ compile()，不是 ast.parse()。重复参数名之类的错误是**编译期**检查，
+    #   parse 会放过去；用 ast.parse 做守卫时，一个 duplicate argument 能一路
+    #   活到 import 才炸。
+    compile(source, str(EVAL_SRC), "exec")
+    tree = ast.parse(source)
     module_names = set(dir(builtins)) | {"__name__", "__file__"}
     for node in tree.body:
         if isinstance(node, (ast.Import, ast.ImportFrom)):

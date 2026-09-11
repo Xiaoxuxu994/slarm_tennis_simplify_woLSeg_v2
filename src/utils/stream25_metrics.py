@@ -306,6 +306,58 @@ def apply_ball_surface_offset(
     return positions + unit * offset_meters
 
 
+def fit_ballistic_state(
+    positions: torch.Tensor,
+    times: torch.Tensor,
+    gravity: torch.Tensor,
+) -> torch.Tensor:
+    """Least-squares (pos, vel) at ``t = 0`` from several observed positions.
+
+    Removing the known gravity term linearizes the trajectory::
+
+        q(t) = p(t) - 0.5 * g * t**2 = p0 + v0 * t
+
+    so a plain two-parameter fit recovers the state. Two properties matter here,
+    and both are tested:
+
+    ★ A **constant** position bias cancels out of the velocity exactly. It shifts
+      q(t) by the same amount at every t, so it lands entirely in p0 and leaves
+      v0 untouched. Learned position heads carry systematic biases -- this repo
+      already found one, the 2.1 cm between the ball's front surface and its
+      centre -- and this fit is immune to that whole class.
+
+    ★ The velocity error scales as ``sigma_p / (dt * sqrt(n(n^2-1)/12))``, which
+      is dominated by the **time span**, not the sample count. Dropping the two
+      earliest observations from the frozen six takes the span from 0.50 s to
+      0.30 s and makes the fitted velocity 1.87x worse -- enough to lose to
+      direct regression. Only drop early observations when their position error
+      is more than about 1.6x the later ones; ball_prefix_pos_error_frame* is
+      reported so that ratio is visible rather than assumed.
+
+    Args:
+        positions: ``[N, 3]`` observed positions, in any single frame.
+        times: ``[N]`` observation times in seconds, relative to the target
+            instant, so ``p0`` comes out at that instant. Must be distinct.
+        gravity: ``[3]`` in the same frame as ``positions``.
+
+    Returns:
+        ``[6]`` = ``(p0, v0)``.
+    """
+    if positions.ndim != 2 or positions.shape[-1] != 3:
+        raise ValueError("positions must be [N, 3]")
+    if times.ndim != 1 or times.shape[0] != positions.shape[0] or times.shape[0] < 2:
+        raise ValueError("times must be [N] with N >= 2 and match positions")
+    if gravity.shape != (3,):
+        raise ValueError("gravity must be a three-vector")
+    t = times.double()
+    if torch.unique(t).numel() != t.numel():
+        raise ValueError("Observation times must be distinct")
+    corrected = positions.double() - 0.5 * (t ** 2)[:, None] * gravity.double()
+    design = torch.stack((torch.ones_like(t), t), dim=-1)          # [N, 2]
+    solution = torch.linalg.lstsq(design, corrected).solution      # [2, 3]
+    return solution.reshape(6).to(positions.dtype)
+
+
 def transform_position(position: torch.Tensor, transform: torch.Tensor) -> torch.Tensor:
     """Apply a homogeneous rigid transform to one or more 3-D positions."""
     if position.shape[-1] != 3 or transform.shape[-2:] != (4, 4):
