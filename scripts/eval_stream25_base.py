@@ -78,6 +78,11 @@ BALL_TOKEN_METRIC_NAMES = (
     "pixel_pos_error_frame9", "pixel_pos_error_frame12", "pixel_pos_error_frame15",
     "pixel_pos_error_constant_m",
     "pixel_pos_error_scatter_m",
+    # 逐帧速度读出去重力后平均（零训练的第三个估计器）。spread 接近 0 = 各帧读出
+    # 实质相同，平均没有空间；spread 大且误差下降 = 逐帧读出带独立信息。
+    "frame24_position_balltoken_vavg",
+    "ball_vel15_error_balltoken_vavg",
+    "ball_vel15_spread_balltoken",
 )
 # 这些指标跨场景聚合时，p95 子键取场景间的 95 分位（与 frame24_position 同口径）。
 _P95_ACROSS_SCENES = ("frame24_position",) + BALL_TOKEN_METRIC_NAMES
@@ -324,6 +329,29 @@ def _balltoken_fit_metrics(prefix_states, data_dict, gt_pos24, *,
             error = float((states[step, :3] - truth[frame]).norm().item())
             if math.isfinite(error):
                 out[f"ball_prefix_pos_error_frame{frame}"] = error
+
+    # (c) 第三个零训练估计器：每一帧的速度读出各自去掉重力，再平均。
+    #     弹道下 v(t) = v15 + g*(t - t15)，所以 v15 = v(t) - g*(t - t15)。
+    #     frames 6/9/12 的速度是被真实监督的（stream25_losses.py 的 ball_prefix_vel，
+    #     权重 0.25/0.5/1.0），frame 15 由主 ball_vel 损失监督；frames 0/3 没有速度
+    #     监督，所以排除在外。
+    #     ball_vel15_spread_balltoken 是这几个估计之间的散布：接近 0 说明各帧读出
+    #     实质相同，平均拿不到任何东西；散布大才有平均的空间。
+    gravity_vec = states.new_tensor(MS3_GRAVITY_RIG)
+    supervised = [i for i, frame in enumerate(STREAM25_CONTEXT_FRAMES[: states.shape[0]])
+                  if frame >= 6]
+    if len(supervised) >= 2:
+        estimates = states[supervised, 3:] - gravity_vec * times[supervised, None]
+        averaged = estimates.mean(dim=0)
+        out["ball_vel15_spread_balltoken"] = float(
+            (estimates - averaged).norm(dim=-1).mean().item())
+        gt_v = data_dict.get("ball_velocity_rig")
+        if gt_v is not None:
+            out["ball_vel15_error_balltoken_vavg"] = float(
+                (averaged - gt_v[0, 15].float().cpu()).norm().item())
+        predicted = integrate_frame24_position_physics(
+            states[-1, :3], averaged, dt, gravity_vec)
+        out["frame24_position_balltoken_vavg"] = float((predicted - gt_pos24).norm().item())
 
     selected = list(range(states.shape[0])) if not fit_frames else [
         STREAM25_CONTEXT_FRAMES.index(frame) for frame in fit_frames

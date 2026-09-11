@@ -35,6 +35,11 @@ KEY_METRICS: List[Tuple[str, str, List[Tuple[str, str]], Optional[str]]] = [
     ("balltoken fit vel15 med / p95",   "down", [("ball_vel15_error_balltoken_fit", "median"), ("ball_vel15_error_balltoken_fit", "p95")], None),
     # 逐 prefix 帧的位置误差。决定拟合该用几帧 —— 早期帧劣化超过后期约 1.6 倍时，
     # 缩短时间跨度的代价就盖过去掉坏样本的好处（见 stream25_metrics.fit_ballistic_state）。
+    # 逐帧速度读出去重力后平均。spread 是这几个估计之间的散布：
+    #   spread ~ 0    -> 各帧读出实质相同，平均无用
+    #   spread 大且 vavg 误差明显低于 balltoken vel15 -> 逐帧读出带独立信息
+    ("balltoken vavg frame24 / vel15",  "down", [("frame24_position_balltoken_vavg", "median"), ("ball_vel15_error_balltoken_vavg", "median")], None),
+    ("balltoken vel15 spread",          "down", [("ball_vel15_spread_balltoken", "median")], None),
     ("balltoken prefix pos f0 / f15",   "down", [("ball_prefix_pos_error_frame0", "median"), ("ball_pos15_error", "median")], None),
     # 像素路径的多帧弹道拟合读出。和最上面的 frame24 position 直接可比（同为三目取最差）。
     #   fit vel15 明显好 -> MS3 直接预测速度不是最优，换拟合读出，零训练。
