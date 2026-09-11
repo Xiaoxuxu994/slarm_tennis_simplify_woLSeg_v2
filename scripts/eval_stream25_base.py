@@ -67,6 +67,17 @@ BALL_TOKEN_METRIC_NAMES = (
     "ball_prefix_pos_error_frame6",
     "ball_prefix_pos_error_frame9",
     "ball_prefix_pos_error_frame12",
+    # 像素路径的多帧弹道拟合读出：把 frame 0/3/6/9/12/15 各自渲染出的球心拿去拟合，
+    # 代替 MS3 头直接预测的 v15。不需要 ball token，任何 ckpt 都有。
+    "frame24_position_fit",
+    "ball_pos15_error_fit",
+    "ball_vel15_error_fit",
+    # 逐帧位置误差，以及它拆成「跨帧恒定」与「逐帧抖动」两部分。
+    # 只有抖动会传进拟合速度：constant 越大、scatter 越小，拟合赢得越多。
+    "pixel_pos_error_frame0", "pixel_pos_error_frame3", "pixel_pos_error_frame6",
+    "pixel_pos_error_frame9", "pixel_pos_error_frame12", "pixel_pos_error_frame15",
+    "pixel_pos_error_constant_m",
+    "pixel_pos_error_scatter_m",
 )
 # 这些指标跨场景聚合时，p95 子键取场景间的 95 分位（与 frame24_position 同口径）。
 _P95_ACROSS_SCENES = ("frame24_position",) + BALL_TOKEN_METRIC_NAMES
@@ -334,6 +345,143 @@ def _balltoken_fit_metrics(prefix_states, data_dict, gt_pos24, *,
     return out
 
 
+def rendered_ball_positions_per_view(
+    depth: torch.Tensor,
+    semantic: torch.Tensor,
+    ray_origins: torch.Tensor,
+    ray_directions: torch.Tensor,
+    canonical_to_rig: torch.Tensor,
+    *,
+    ball_surface_offset: float = 0.0,
+) -> List[Optional[torch.Tensor]]:
+    """One rig-frame ball centre per view at a single rendered frame, or None.
+
+    This is the same read the frame-24 metric performs at frame 15 -- predicted
+    semantic picks the ball pixels, the rendered depth is back-projected, and the
+    per-pixel median pools them -- factored out so the earlier context frames can
+    be read the same way.
+    """
+    positions = ray_origins + ray_directions * depth[..., None]
+    positions = apply_ball_surface_offset(positions, ray_directions, ball_surface_offset)
+    out: List[Optional[torch.Tensor]] = []
+    for eye in range(depth.shape[0]):
+        mask = (
+            (semantic[eye] == 1)
+            & torch.isfinite(depth[eye])
+            & (depth[eye] > 0)
+            & torch.isfinite(positions[eye]).all(dim=-1)
+        )
+        if not mask.any():
+            out.append(None)
+            continue
+        out.append(transform_position(
+            positions[eye][mask].median(dim=0).values, canonical_to_rig))
+    return out
+
+
+def compute_rendered_history_fit_metrics(
+    pred_depth: torch.Tensor,
+    pred_sem: torch.Tensor,
+    ray_origins: torch.Tensor,
+    ray_directions: torch.Tensor,
+    canonical_to_rig: torch.Tensor,
+    target_time: torch.Tensor,
+    gt_pos24: torch.Tensor,
+    gt_positions: Optional[torch.Tensor],
+    gt_v15: Optional[torch.Tensor],
+    *,
+    dt: float,
+    timespan: float,
+    ball_surface_offset: float = 0.0,
+    fit_frames: Optional[Sequence[int]] = None,
+) -> Dict[str, float]:
+    """Refit (pos15, v15) from the ball's rendered position at several frames.
+
+    ★ Why this is not circular. terminal_context_extrapolation makes frame 15 the
+      sole owner of targets at or after frame 15 (slarm.py clears the earlier
+      context frames there), but targets *before* frame 15 are still rendered by
+      the nearby context frames' own Gaussians under time_mask_backward. So the
+      ball's position at frames 0..12 is an observation, not frame 15's velocity
+      integrated backwards, and fitting a velocity to them learns something the
+      MS3 head did not already assert.
+
+    ★ Why it can beat the MS3 head. A position error component that is constant
+      across the six frames cancels exactly out of the fitted velocity, so only
+      the frame-to-frame scatter matters. pixel_pos_error_constant_m and
+      pixel_pos_error_scatter_m split the measured error that way; the ratio
+      between them is what decides how much this can win, and it is reported
+      rather than assumed.
+
+    Conservative pooling matches frame24_position: fit each view separately and
+    keep the worst finite error, so the two numbers are directly comparable.
+    """
+    out: Dict[str, float] = {}
+    frames = list(STREAM25_CONTEXT_FRAMES)
+    if pred_depth.shape[0] <= frames[-1]:
+        return out
+    gravity = gt_pos24.new_tensor(MS3_GRAVITY_RIG)
+    times = torch.tensor(
+        [float(target_time[0, frame, 0].item()) for frame in frames],
+        dtype=torch.float64,
+    )
+    times = ((times - times[-1]) * float(timespan)).float()
+
+    per_frame: List[List[Optional[torch.Tensor]]] = [
+        rendered_ball_positions_per_view(
+            pred_depth[frame], pred_sem[frame],
+            ray_origins[frame], ray_directions[frame], canonical_to_rig,
+            ball_surface_offset=ball_surface_offset,
+        )
+        for frame in frames
+    ]
+
+    # Per-frame position error, and its split into a constant offset and the
+    # frame-to-frame scatter. Only the scatter propagates into a fitted velocity.
+    if gt_positions is not None:
+        residuals: List[torch.Tensor] = []
+        for index, frame in enumerate(frames):
+            finite = [p for p in per_frame[index] if p is not None and torch.isfinite(p).all()]
+            if not finite:
+                continue
+            worst = max(float((p - gt_positions[frame]).norm().item()) for p in finite)
+            if math.isfinite(worst):
+                out[f"pixel_pos_error_frame{frame}"] = worst
+            residuals.append(torch.stack(finite).mean(dim=0) - gt_positions[frame])
+        if len(residuals) >= 2:
+            stacked = torch.stack(residuals)
+            constant = stacked.mean(dim=0)
+            out["pixel_pos_error_constant_m"] = float(constant.norm().item())
+            out["pixel_pos_error_scatter_m"] = float(
+                (stacked - constant).norm(dim=-1).mean().item())
+
+    selected = [frames.index(f) for f in fit_frames] if fit_frames else list(range(len(frames)))
+    if len(selected) < 2:
+        return out
+
+    errors, vel_errors, pos_errors = [], [], []
+    for eye in range(pred_depth.shape[1]):
+        usable = [i for i in selected
+                  if per_frame[i][eye] is not None and torch.isfinite(per_frame[i][eye]).all()]
+        if len(usable) < 2:
+            continue
+        fitted = fit_ballistic_state(
+            torch.stack([per_frame[i][eye] for i in usable]), times[usable], gravity)
+        pos15, v15 = fitted[:3], fitted[3:]
+        predicted = integrate_frame24_position_physics(pos15, v15, dt, gravity)
+        errors.append(float((predicted - gt_pos24).norm().item()))
+        if gt_positions is not None:
+            pos_errors.append(float((pos15 - gt_positions[15]).norm().item()))
+        if gt_v15 is not None:
+            vel_errors.append(float((v15 - gt_v15).norm().item()))
+    for name, values in (("frame24_position_fit", errors),
+                         ("ball_pos15_error_fit", pos_errors),
+                         ("ball_vel15_error_fit", vel_errors)):
+        finite = [v for v in values if math.isfinite(v)]
+        if finite:
+            out[name] = max(finite)
+    return out
+
+
 def compute_rendered_frame24_position_errors(
     depth15: torch.Tensor,
     semantic15: torch.Tensor,
@@ -553,6 +701,7 @@ def _summarize_scene_scope(
     frame24_errors: List[float],
     eye_indices: tuple[int, ...],
     balltoken_metrics: Optional[Dict[str, float]] = None,
+    history_fit_metrics: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Any]:
     selected = [record for record in records if record["eye"] in eye_indices]
     metrics: Dict[str, Dict[str, float]] = {}
@@ -649,8 +798,9 @@ def _summarize_scene_scope(
     # 所以 aggregate 与三个具名视图 scope 记录同一个数。单场景内 median==p95（只有一个样本）；
     # 分位数的差异在 _aggregate_scene_scope_metrics 的跨场景聚合里才产生。
     # 没有 ball token 时不写入这些键，指标在报告中直接缺席，而不是记成 nan/失败。
+    combined_scalar_metrics = {**(balltoken_metrics or {}), **(history_fit_metrics or {})}
     for name in BALL_TOKEN_METRIC_NAMES:
-        value = (balltoken_metrics or {}).get(name)
+        value = combined_scalar_metrics.get(name)
         if value is None or not math.isfinite(value):
             continue
         metrics[name] = {"median": value, "p95": value}
@@ -803,6 +953,23 @@ def compute_stream25_scene_metrics(
         ball_surface_offset=ball_surface_offset,
     )
 
+    # 并列的像素路径多帧拟合落点：所有 ckpt 都能算，不依赖 ball token。
+    _gt_positions = data_dict.get("ball_position_rig")
+    history_fit_metrics = compute_rendered_history_fit_metrics(
+        pred_depth, pred_sem,
+        target_ray_origins[0].float().cpu(),
+        target_ray_directions[0].float().cpu(),
+        canonical_to_rig,
+        data_dict["target_time"],
+        gt_pos24,
+        None if _gt_positions is None else _gt_positions[0].float().cpu(),
+        None if data_dict.get("ball_velocity_rig") is None
+        else data_dict["ball_velocity_rig"][0, 15].float().cpu(),
+        dt=dt, timespan=timespan,
+        ball_surface_offset=ball_surface_offset,
+        fit_frames=balltoken_fit_frames,
+    )
+
     # 并列的 ball token 落点（仅当模型带内建 ball token 时存在）。
     balltoken_metrics = compute_balltoken_frame24_metrics(
         predictions.get("ball_pos15"),
@@ -829,6 +996,7 @@ def compute_stream25_scene_metrics(
             frame24_errors,
             eye_indices,
             balltoken_metrics,
+            history_fit_metrics,
         )
         for scope, eye_indices in scope_eye_indices.items()
     }

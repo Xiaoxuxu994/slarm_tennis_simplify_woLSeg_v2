@@ -59,6 +59,15 @@ echo "out:    ${OUT_DIR}"
 echo "GPU:    ${GPUS}"
 echo ""
 
+# 像素路径的多帧弹道拟合读出（pixel fit *）：把 frame 0/3/6/9/12/15 各自渲染出的
+# 球心拿去拟合 (pos15, v15)，代替 MS3 头直接预测速度。**任何 ckpt 都会算**，
+# 不需要 ball token，也不需要重训。和最上面的 frame24 position 同为三目取最差，直接可比。
+#   不循环：terminal_context_extrapolation 只让 frame15 独占 >=15 的目标，
+#   <15 的目标仍由各自附近 context 帧的高斯渲染，是真观测。
+# 先看这两个数决定它能赢多少：
+#   pixel pos err const / scatter —— 恒定分量在拟合速度里精确抵消，只有 scatter 会传进去。
+#   const >> scatter -> 拟合大赢；const ≈ scatter -> 只能小赢。
+#
 # ball token 的多帧弹道拟合读出（frame24_position_balltoken_fit 等）默认就会算，
 # 只要 ckpt 带 ball_prefix_supervision；不带的 ckpt 上这些行显示 n/a，不影响其他指标。
 # 想改用哪几帧拟合，追加参数即可（"$@" 会透传下去）：

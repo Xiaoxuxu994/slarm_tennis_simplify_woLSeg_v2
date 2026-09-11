@@ -36,6 +36,15 @@ KEY_METRICS: List[Tuple[str, str, List[Tuple[str, str]], Optional[str]]] = [
     # 逐 prefix 帧的位置误差。决定拟合该用几帧 —— 早期帧劣化超过后期约 1.6 倍时，
     # 缩短时间跨度的代价就盖过去掉坏样本的好处（见 stream25_metrics.fit_ballistic_state）。
     ("balltoken prefix pos f0 / f15",   "down", [("ball_prefix_pos_error_frame0", "median"), ("ball_pos15_error", "median")], None),
+    # 像素路径的多帧弹道拟合读出。和最上面的 frame24 position 直接可比（同为三目取最差）。
+    #   fit vel15 明显好 -> MS3 直接预测速度不是最优，换拟合读出，零训练。
+    #   constant >> scatter -> 逐帧误差主要是恒定偏置，拟合能赢很多。
+    #   constant ≈ scatter -> 误差主要是逐帧抖动，拟合只能小赢。
+    ("pixel fit frame24 med / p95",     "down", [("frame24_position_fit", "median"), ("frame24_position_fit", "p95")], None),
+    ("pixel fit pos15 med / p95",       "down", [("ball_pos15_error_fit", "median"), ("ball_pos15_error_fit", "p95")], None),
+    ("pixel fit vel15 med / p95",       "down", [("ball_vel15_error_fit", "median"), ("ball_vel15_error_fit", "p95")], None),
+    ("pixel pos err const / scatter",   "down", [("pixel_pos_error_constant_m", "median"), ("pixel_pos_error_scatter_m", "median")], None),
+    ("pixel pos err f0 / f15",          "down", [("pixel_pos_error_frame0", "median"), ("pixel_pos_error_frame15", "median")], None),
     ("ball velocity med / p95",       "down", [("ms3_ball_velocity", "median"), ("ms3_ball_velocity", "p95")], "ms3_ball_velocity"),
     ("ball acceleration med / p95",   "down", [("ms3_ball_acceleration", "median"), ("ms3_ball_acceleration", "p95")], "ms3_ball_acceleration"),
     ("ball jerk med / p95",           "down", [("ms3_ball_jerk", "median"), ("ms3_ball_jerk", "p95")], "ms3_ball_jerk"),
