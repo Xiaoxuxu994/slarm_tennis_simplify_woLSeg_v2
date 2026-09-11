@@ -1308,7 +1308,7 @@ def run_evaluation(
             scene_result = evaluate_scene(
                 model, prepared, torch_device, args.timespan,
                 ball_surface_offset=ball_surface_offset,
-        balltoken_fit_frames=balltoken_fit_frames,
+                balltoken_fit_frames=balltoken_fit_frames,
             )
             scene_result["scene_index"] = index
             scene_result["scene_name"] = input_dict.get("scene_name", [str(index)])[0]
@@ -1348,6 +1348,7 @@ def _finalize_and_write(
     output_json,
     output_markdown,
     ball_surface_offset=0.0,
+    balltoken_fit_frames=None,
     ball_radius=None,
     ball_radius_compensation=0.0,
 ):
@@ -1403,6 +1404,7 @@ def _finalize_and_write(
         "ball_surface_offset_m": ball_surface_offset,
         "ball_radius_m": ball_radius,
         "ball_radius_compensation": ball_radius_compensation,
+        "balltoken_fit_frames": list(balltoken_fit_frames) if balltoken_fit_frames else None,
         "metrics": metrics,
         "valid_counts": valid_counts,
         "scope_reports": scope_reports,
