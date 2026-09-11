@@ -106,6 +106,35 @@ echo ""
 # ★ 默认用全部 6 帧。少用帧会缩短时间基线，0.50s -> 0.30s 让拟合速度差 1.87 倍，
 #   足以输给直接回归。只在 ball_prefix_pos_error_frame0 比 pos15 差 1.6 倍以上时才砍。
 
+# ---------------------------------------------------------------------------
+# 滑动观测窗口（--context-offset N）—— 零重训，收益最大的一个开关
+# ---------------------------------------------------------------------------
+# datasets.py 的 get_frame 算的是
+#     dt = time_in_seconds[frame_idx] - time_in_seconds[source_frame_idx]
+# 而 source_frame_idx = context_frames[0]，即时间是相对**窗口自己的第一帧**的。
+# 窗口整体后移、source 跟着移，模型收到的时间值逐字节不变（0, 0.1, ..., 0.5 秒），
+# 连续的 time_embedder 分辨不出两个窗口。**变的只有图像里球更近。不需要重训。**
+#
+# 为什么值得：三角化深度误差 ~ Z^2/(B*f)，球更近就测得更准；终端帧更晚，到接球帧
+# 的外推更短。两者相乘：
+#
+#   offset  context           窗口中点 Z   终端   外推到 frame 45
+#        0  0,3,...,15           4.78 m     15         1.005 s
+#        9  9,12,...,24          3.81 m     24         0.700 s
+#
+# 机械臂 frame 29 才动，所以 frames 16..28 是现在没人用的观测。
+#
+# ★ 跨 offset 只能比 catch_position。frame24_* 的外推时长随窗口滑动而变，
+#   pos15/v15 测的是不同时刻 —— compare_evaluations.py 会在 offset 不一致时警告。
+#   offset 0 逐字节等于冻结契约，所有历史数字仍然可比。
+#
+# 例（同一个 ckpt 扫窗口，这是判断"看得更晚值多少"的完整实验）：
+#   for k in 0 3 6 9; do
+#       bash run_sh/eval.sh --context-offset $k
+#   done
+#   注意：输出目录只按 config+ckpt 命名，扫 offset 时会互相覆盖 ——
+#   先把上一轮的 evaluation.json 挪走，或者逐个改 CONFIG_NAME。
+
 REPORTS=()
 for CKPT in "${EXPANDED[@]}"; do
     TAG="$(basename "${CKPT}" .pth)"

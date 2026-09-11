@@ -85,6 +85,9 @@ def build_stream25_dataset(
         img_norm_for_online_feat=args.img_norm_for_online_feat,
         strict_data_loading=True,
         context_stride=args.context_stride,
+        # Evaluation-only: slide the observation window later in the clip.
+        # Stream25Dataset rejects a non-zero offset on the training path.
+        context_offset=int(getattr(args, "stream25_context_offset", 0) or 0),
     )
 
 

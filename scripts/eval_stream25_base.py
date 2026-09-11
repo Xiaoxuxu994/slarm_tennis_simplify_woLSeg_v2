@@ -48,7 +48,11 @@ from src.utils.stream25_metrics import (
     transform_position,
     transform_vector,
 )
-from src.dataset.stream25 import MS3_GRAVITY_RIG, STREAM25_CONTEXT_FRAMES
+from src.dataset.stream25 import (
+    MS3_GRAVITY_RIG,
+    STREAM25_ALL_TARGET_FRAMES,
+    STREAM25_CONTEXT_FRAMES,
+)
 
 # ball token 的并列落点指标名（不进 ACCEPTANCE_TABLE，只做对照）。
 BALL_TOKEN_METRIC_NAMES = (
@@ -83,6 +87,11 @@ BALL_TOKEN_METRIC_NAMES = (
     "frame24_position_balltoken_vavg",
     "ball_vel15_error_balltoken_vavg",
     "ball_vel15_spread_balltoken",
+    # 接球帧落点。★ 唯一跨 context offset 可比的落点指标：frame24_* 的外推时长
+    # 随窗口滑动而变，catch_* 固定打在绝对时刻 stream25_catch_frame 上。
+    "catch_position",
+    "catch_position_balltoken",
+    "catch_horizon_s",
 )
 # 这些指标跨场景聚合时，p95 子键取场景间的 95 分位（与 frame24_position 同口径）。
 _P95_ACROSS_SCENES = ("frame24_position",) + BALL_TOKEN_METRIC_NAMES
@@ -255,8 +264,9 @@ def compute_balltoken_frame24_metrics(
     prefix_states: Optional[torch.Tensor] = None,
     timespan: float = 0.8,
     fit_frames: Optional[Sequence[int]] = None,
+    context_offset: int = 0,
 ) -> Optional[Dict[str, float]]:
-    """Score the internal ball token against frame-15 truth and the frame-24 landing.
+    """Score the internal ball token against terminal truth and the landing.
 
     ``ball_pos15``/``ball_v15`` are regressed directly in the scene-fixed rig frame
     (same frame the ``ball_position_rig`` supervision lives in), so no
@@ -281,24 +291,31 @@ def compute_balltoken_frame24_metrics(
     }
     # frame-15 truth is optional: ball_velocity_rig in particular is not emitted by
     # every dataset, so those two diagnostics drop out instead of failing the scene.
+    # ball_position_rig is indexed by ABSOLUTE frame, while the model's readout is
+    # always "the terminal observation". Under a slid window those differ by the
+    # offset, so the GT index has to move with it or the metric silently compares
+    # the terminal state against the wrong instant.
+    terminal = STREAM25_CONTEXT_FRAMES[-1] + int(context_offset)
     gt_pos15 = data_dict.get("ball_position_rig")
     if gt_pos15 is not None:
-        gt = gt_pos15[0, 15].float().cpu()
+        gt = gt_pos15[0, terminal].float().cpu()
         metrics["ball_pos15_error"] = float((pos15 - gt).norm().item())
     gt_v15 = data_dict.get("ball_velocity_rig")
     if gt_v15 is not None:
-        gt = gt_v15[0, 15].float().cpu()
+        gt = gt_v15[0, terminal].float().cpu()
         metrics["ball_vel15_error"] = float((v15 - gt).norm().item())
     metrics.update(
         _balltoken_fit_metrics(prefix_states, data_dict, gt_pos24,
-                               dt=dt, timespan=timespan, fit_frames=fit_frames)
+                               dt=dt, timespan=timespan, fit_frames=fit_frames,
+                               context_offset=context_offset)
     )
     return metrics
 
 
 def _balltoken_fit_metrics(prefix_states, data_dict, gt_pos24, *,
                            dt: float, timespan: float,
-                           fit_frames: Optional[Sequence[int]] = None) -> Dict[str, float]:
+                           fit_frames: Optional[Sequence[int]] = None,
+                           context_offset: int = 0) -> Dict[str, float]:
     """Refit (pos15, v15) from the causal prefix positions instead of regressing v15.
 
     ``ball_prefix_states`` is ``[1, T, 6]`` -- the readout head applied to each
@@ -326,7 +343,7 @@ def _balltoken_fit_metrics(prefix_states, data_dict, gt_pos24, *,
     if gt_pos15 is not None:
         truth = gt_pos15[0].float().cpu()
         for step, frame in enumerate(STREAM25_CONTEXT_FRAMES[: states.shape[0] - 1]):
-            error = float((states[step, :3] - truth[frame]).norm().item())
+            error = float((states[step, :3] - truth[frame + int(context_offset)]).norm().item())
             if math.isfinite(error):
                 out[f"ball_prefix_pos_error_frame{frame}"] = error
 
@@ -348,7 +365,8 @@ def _balltoken_fit_metrics(prefix_states, data_dict, gt_pos24, *,
         gt_v = data_dict.get("ball_velocity_rig")
         if gt_v is not None:
             out["ball_vel15_error_balltoken_vavg"] = float(
-                (averaged - gt_v[0, 15].float().cpu()).norm().item())
+                (averaged - gt_v[0, STREAM25_CONTEXT_FRAMES[-1] + int(context_offset)]
+                 .float().cpu()).norm().item())
         predicted = integrate_frame24_position_physics(
             states[-1, :3], averaged, dt, gravity_vec)
         out["frame24_position_balltoken_vavg"] = float((predicted - gt_pos24).norm().item())
@@ -365,11 +383,13 @@ def _balltoken_fit_metrics(prefix_states, data_dict, gt_pos24, *,
     out["frame24_position_balltoken_fit"] = float((pred_pos24 - gt_pos24).norm().item())
     if gt_pos15 is not None:
         out["ball_pos15_error_balltoken_fit"] = float(
-            (pos15 - gt_pos15[0, 15].float().cpu()).norm().item())
+            (pos15 - gt_pos15[0, STREAM25_CONTEXT_FRAMES[-1] + int(context_offset)]
+             .float().cpu()).norm().item())
     gt_v15 = data_dict.get("ball_velocity_rig")
     if gt_v15 is not None:
         out["ball_vel15_error_balltoken_fit"] = float(
-            (v15 - gt_v15[0, 15].float().cpu()).norm().item())
+            (v15 - gt_v15[0, STREAM25_CONTEXT_FRAMES[-1] + int(context_offset)]
+             .float().cpu()).norm().item())
     return out
 
 
@@ -422,6 +442,7 @@ def compute_rendered_history_fit_metrics(
     timespan: float,
     ball_surface_offset: float = 0.0,
     fit_frames: Optional[Sequence[int]] = None,
+    context_offset: int = 0,
 ) -> Dict[str, float]:
     """Refit (pos15, v15) from the ball's rendered position at several frames.
 
@@ -471,10 +492,11 @@ def compute_rendered_history_fit_metrics(
             finite = [p for p in per_frame[index] if p is not None and torch.isfinite(p).all()]
             if not finite:
                 continue
-            worst = max(float((p - gt_positions[frame]).norm().item()) for p in finite)
+            truth = gt_positions[frame + int(context_offset)]
+            worst = max(float((p - truth).norm().item()) for p in finite)
             if math.isfinite(worst):
                 out[f"pixel_pos_error_frame{frame}"] = worst
-            residuals.append(torch.stack(finite).mean(dim=0) - gt_positions[frame])
+            residuals.append(torch.stack(finite).mean(dim=0) - truth)
         if len(residuals) >= 2:
             stacked = torch.stack(residuals)
             constant = stacked.mean(dim=0)
@@ -498,7 +520,8 @@ def compute_rendered_history_fit_metrics(
         predicted = integrate_frame24_position_physics(pos15, v15, dt, gravity)
         errors.append(float((predicted - gt_pos24).norm().item()))
         if gt_positions is not None:
-            pos_errors.append(float((pos15 - gt_positions[15]).norm().item()))
+            pos_errors.append(float(
+                (pos15 - gt_positions[frames[-1] + int(context_offset)]).norm().item()))
         if gt_v15 is not None:
             vel_errors.append(float((v15 - gt_v15).norm().item()))
     for name, values in (("frame24_position_fit", errors),
@@ -690,6 +713,8 @@ def evaluate_scene(
     *,
     ball_surface_offset: float = 0.0,
     balltoken_fit_frames: Optional[Sequence[int]] = None,
+    context_offset: int = 0,
+    catch_frame: int = 0,
 ) -> Dict[str, Any]:
     """Evaluate one scene through a fresh StreamSession and return per-bucket metrics."""
     from src.models.stream_session import StreamSession
@@ -714,6 +739,8 @@ def evaluate_scene(
         target_ray_directions=target_rays["dirs"],
         ball_surface_offset=ball_surface_offset,
         balltoken_fit_frames=balltoken_fit_frames,
+        context_offset=context_offset,
+        catch_frame=catch_frame,
     )
     return metrics
 
@@ -846,6 +873,8 @@ def compute_stream25_scene_metrics(
     target_ray_directions: torch.Tensor,
     ball_surface_offset: float = 0.0,
     balltoken_fit_frames: Optional[Sequence[int]] = None,
+    context_offset: int = 0,
+    catch_frame: int = 0,
 ) -> Dict[str, Any]:
     render = predictions["render_results"]
     pred_rgb = render["rendered_image"][0].float().cpu()
@@ -960,11 +989,20 @@ def compute_stream25_scene_metrics(
                 )
                 context_values_by_view[name].append(values)
 
-    gt_pos24 = data_dict["ball_position_rig"][0, 24].float().cpu()
+    # Landing target. At offset 0 this is the frozen frame 24 and nothing below
+    # changes. A slid window eats targets off the end of range(25), so index the
+    # target list that actually arrived and convert to the absolute frame that
+    # ball_position_rig is indexed by.
+    landing_index = min(
+        STREAM25_ALL_TARGET_FRAMES[-1], int(data_dict["target_time"].shape[1]) - 1
+    )
+    gt_pos24 = data_dict["ball_position_rig"][
+        0, landing_index + int(context_offset)
+    ].float().cpu()
     canonical_to_rig = data_dict["context_canonical_to_rig"][0, -1].float().cpu()
     dt = float(
         (
-            data_dict["target_time"][0, 24, 0]
+            data_dict["target_time"][0, landing_index, 0]
             - data_dict["context_time"][0, -1, 0]
         ).item()
         * timespan
@@ -996,6 +1034,7 @@ def compute_stream25_scene_metrics(
         dt=dt, timespan=timespan,
         ball_surface_offset=ball_surface_offset,
         fit_frames=balltoken_fit_frames,
+        context_offset=context_offset,
     )
 
     # 并列的 ball token 落点（仅当模型带内建 ball token 时存在）。
@@ -1008,7 +1047,54 @@ def compute_stream25_scene_metrics(
         prefix_states=predictions.get("ball_prefix_states"),
         timespan=timespan,
         fit_frames=balltoken_fit_frames,
+        context_offset=context_offset,
     )
+
+    # ---- catch-frame landing: the only number comparable across window offsets --
+    # frame24_* extrapolates from the terminal observation to a fixed TARGET, so
+    # its horizon shrinks as the window slides and the numbers stop meaning the
+    # same thing. The catch frame is fixed in absolute time, so the horizon
+    # (catch_frame - terminal) is exactly what sliding the window buys, and every
+    # configuration is scored against the same instant.
+    #
+    # GT at the catch frame is the analytic continuation of the GT terminal state.
+    # That is exact here, not an approximation, because the simulator has no air
+    # drag. Real drag would add roughly 10 cm over 1 s at this ball speed, so the
+    # day the simulator gains drag this continuation has to be replaced by stored
+    # GT (see docs/EXPERIMENTS_AND_ERROR_BUDGET.md).
+    catch_metrics: Dict[str, float] = {}
+    terminal_frame = STREAM25_CONTEXT_FRAMES[-1] + int(context_offset)
+    _gt_v_all = data_dict.get("ball_velocity_rig")
+    if catch_frame and _gt_positions is not None and _gt_v_all is not None:
+        span = STREAM25_ALL_TARGET_FRAMES[-1] - STREAM25_ALL_TARGET_FRAMES[0]
+        catch_dt = (int(catch_frame) - terminal_frame) * float(timespan) / float(span)
+        gravity = torch.tensor(MS3_GRAVITY_RIG, dtype=torch.float32)
+        gt_catch = integrate_frame24_position_physics(
+            _gt_positions[0, terminal_frame].float().cpu(),
+            _gt_v_all[0, terminal_frame].float().cpu(),
+            catch_dt, gravity,
+        )
+        catch_metrics["catch_horizon_s"] = catch_dt
+        worst = compute_rendered_frame24_position_error(
+            pred_depth[15], pred_sem[15], pred_ms3[15],
+            target_ray_origins[0, 15].float().cpu(),
+            target_ray_directions[0, 15].float().cpu(),
+            canonical_to_rig, gt_catch, dt=catch_dt,
+            ball_surface_offset=ball_surface_offset,
+        )
+        if math.isfinite(worst):
+            catch_metrics["catch_position"] = worst
+        _bt_p, _bt_v = predictions.get("ball_pos15"), predictions.get("ball_v15")
+        if _bt_p is not None and _bt_v is not None:
+            _p = _bt_p.reshape(-1)[:3].float().cpu()
+            _v = _bt_v.reshape(-1)[:3].float().cpu()
+            if torch.isfinite(_p).all() and torch.isfinite(_v).all():
+                catch_metrics["catch_position_balltoken"] = float(
+                    (integrate_frame24_position_physics(_p, _v, catch_dt, gravity)
+                     - gt_catch).norm().item())
+    # Flat scalar dicts are merged wholesale at _summarize_scene_scope, so folding
+    # the catch metrics in here needs no new plumbing.
+    history_fit_metrics.update(catch_metrics)
 
     scope_eye_indices = {
         "aggregate": tuple(range(num_views)),
@@ -1177,6 +1263,7 @@ def run_evaluation(
     ball_radius_compensation: float = 0.0,
     ball_radius: Optional[float] = None,
     balltoken_fit_frames: Optional[Sequence[int]] = None,
+    context_offset: int = 0,
 ) -> Dict[str, Any]:
     """Run full evaluation on a split. For final-test, require a selection report."""
     if split == "final-test":
@@ -1278,6 +1365,28 @@ def run_evaluation(
             raise RuntimeError(
                 "final-test manifest hash differs from the frozen selection report"
             )
+    # Slide the observation window later in the clip. get_frame measures time
+    # from the window's own first frame, so the trunk receives bit-identical time
+    # values at any offset and no retraining is involved -- only nearer images.
+    # catch_position is the number to read across offsets; frame24_* changes its
+    # horizon with the window and stops being comparable.
+    context_offset = int(context_offset or 0)
+    args.stream25_context_offset = context_offset
+    catch_frame = int(getattr(args, "stream25_catch_frame", 0) or 0)
+    if context_offset:
+        terminal = STREAM25_CONTEXT_FRAMES[-1] + context_offset
+        print(
+            f"[eval] context window slid +{context_offset}: "
+            f"{tuple(f + context_offset for f in STREAM25_CONTEXT_FRAMES)}, "
+            f"terminal frame {terminal}. frame24_* is NOT comparable to offset 0; "
+            f"read catch_position instead.",
+            flush=True,
+        )
+        if not catch_frame:
+            raise ValueError(
+                "a slid window needs stream25_catch_frame in the config: without "
+                "it there is no offset-independent landing metric to compare"
+            )
     dataset = build_stream25_dataset(args, split, online_feat=False)
     model = build_stream25_model(args, torch_device)
     model.eval()
@@ -1309,6 +1418,8 @@ def run_evaluation(
                 model, prepared, torch_device, args.timespan,
                 ball_surface_offset=ball_surface_offset,
                 balltoken_fit_frames=balltoken_fit_frames,
+                context_offset=context_offset,
+                catch_frame=catch_frame,
             )
             scene_result["scene_index"] = index
             scene_result["scene_name"] = input_dict.get("scene_name", [str(index)])[0]
@@ -1333,6 +1444,8 @@ def run_evaluation(
         balltoken_fit_frames=balltoken_fit_frames,
         ball_radius=ball_radius,
         ball_radius_compensation=ball_radius_compensation,
+        context_offset=context_offset,
+        catch_frame=catch_frame,
     )
 
 
@@ -1351,6 +1464,8 @@ def _finalize_and_write(
     balltoken_fit_frames=None,
     ball_radius=None,
     ball_radius_compensation=0.0,
+    context_offset=0,
+    catch_frame=0,
 ):
     """对（可能来自多个 shard 合并的）全量 scene_results 做一次完整聚合并写出。
 
@@ -1405,6 +1520,12 @@ def _finalize_and_write(
         "ball_radius_m": ball_radius,
         "ball_radius_compensation": ball_radius_compensation,
         "balltoken_fit_frames": list(balltoken_fit_frames) if balltoken_fit_frames else None,
+        # Which window this run observed. A non-zero offset moves the terminal
+        # observation, so frame24_* is measured over a different horizon and must
+        # not be compared across offsets -- catch_position is the one that can.
+        "context_offset": int(context_offset),
+        "context_frames": [f + int(context_offset) for f in STREAM25_CONTEXT_FRAMES],
+        "catch_frame": int(catch_frame),
         "metrics": metrics,
         "valid_counts": valid_counts,
         "scope_reports": scope_reports,
@@ -1437,6 +1558,11 @@ def _finalize_and_write(
             f"- Scenes: **{result['scene_count']}**",
             f"- Considered frame-eyes: **{result['considered_frame_eyes']}**",
             f"- Overall: **{result['overall']}**",
+            (f"- Context window: **{result['context_frames']}**"
+             f" (offset +{result['context_offset']}); compare **catch_position**,"
+             f" not frame24_*"
+             if result["context_offset"] else
+             f"- Context window: **frozen {list(STREAM25_CONTEXT_FRAMES)}**"),
             (f"- Ball-surface compensation: **{result['ball_surface_offset_m']*100:.2f} cm**"
              f"（{result['ball_radius_compensation']:.3f} x r={result['ball_radius_m']:.4f} m）"
              "　★ frame24_position 与未开此项的历史数字不可比"
@@ -1495,6 +1621,11 @@ if __name__ == "__main__":
     parser.add_argument("--ball-radius", "--ball_radius", dest="ball_radius",
                         type=float, default=None,
                         help="球半径（米）。默认读 config 的 stream25_ball_radius（0.0325）")
+    parser.add_argument("--context-offset", "--context_offset", dest="context_offset",
+                        type=int, default=0,
+                        help="把观测窗口整体后移 N 帧（仅评测）。0 = 冻结契约，"
+                             "与历史数字逐字节可比；9 = context 变成 9,12,...,24。"
+                             "跨 offset 只能比 catch_position，不能比 frame24_*")
     args = parser.parse_args()
 
     sel = None
@@ -1513,5 +1644,6 @@ if __name__ == "__main__":
             [int(x) for x in args.balltoken_fit_frames.split(",") if x.strip()]
             if args.balltoken_fit_frames else None
         ),
+        context_offset=args.context_offset,
     )
     print(json.dumps(result, indent=2))

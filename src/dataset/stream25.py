@@ -52,6 +52,66 @@ STREAM25_EXTRAP_BANDS: Tuple[Tuple[int, int], ...] = (
 MS3_GRAVITY_RIG: Tuple[float, float, float] = (0.0, 0.0, -9.81)
 
 
+# ---------------------------------------------------------------------------
+# Sliding the observation window later in the clip
+# ---------------------------------------------------------------------------
+#
+# Why this is only a data-side change. get_frame computes
+#     dt = time_in_seconds[frame_idx] - time_in_seconds[source_frame_idx]
+# with source_frame_idx = context_frames[0], so the times the trunk sees are
+# measured from the FIRST CONTEXT FRAME, not from the start of the clip. Slide
+# the window and move source_frame_idx with it and the time values the model
+# receives are bit-identical: 0, 0.1, 0.2, 0.3, 0.4, 0.5 seconds. The continuous
+# time_embedder cannot tell the two windows apart. Only the images change, and
+# in them the ball is nearer, which is the entire point.
+#
+# Why it is worth doing. Triangulated depth error goes as Z^2 / (B*f), so a ball
+# that is closer is measured better, and a terminal frame that is later leaves a
+# shorter extrapolation to the catch. For this rig the two compound:
+#
+#   offset  window        window-mid Z   terminal   extrapolation to frame 45
+#        0  0,3,..,15         4.78 m           15               1.005 s
+#        9  9,12,..,24        3.81 m           24               0.700 s
+#
+# The robot arm does not move until frame 29, so frames 16..28 are observations
+# nobody is currently using, and using them costs no retraining at all.
+#
+# What it costs. Targets are the frozen range(25), so an offset eats target
+# frames off the end: offset 9 leaves targets 9..24 and the relative frame-24
+# landing no longer exists. That is why eval switches its landing target to the
+# catch frame when the offset is non-zero, and why catch_position_* is computed
+# at EVERY offset -- it is the only number comparable across windows.
+
+
+def shifted_contract(offset: int) -> Tuple[Tuple[int, ...], Tuple[int, ...]]:
+    """Context and target frames for a window slid ``offset`` frames later.
+
+    Returns ``(context_frames, target_frames)``. Targets keep the frozen
+    contract's one-frame spacing and are clipped to the last frame the dataset
+    actually stores, so the caller never asks for an image that is not there.
+    ``offset == 0`` returns the frozen contract unchanged, byte for byte.
+    """
+    if not isinstance(offset, int) or isinstance(offset, bool):
+        raise TypeError("context offset must be an int")
+    last_stored = STREAM25_ALL_TARGET_FRAMES[-1]
+    if offset < 0 or STREAM25_CONTEXT_FRAMES[-1] + offset > last_stored:
+        raise ValueError(
+            f"context offset {offset} must be in [0, "
+            f"{last_stored - STREAM25_CONTEXT_FRAMES[-1]}]: the terminal "
+            f"observation has to stay inside the stored frames 0..{last_stored}"
+        )
+    context = tuple(frame + offset for frame in STREAM25_CONTEXT_FRAMES)
+    targets = tuple(
+        frame for frame in (f + offset for f in STREAM25_ALL_TARGET_FRAMES)
+        if frame <= last_stored
+    )
+    # The terminal observation must itself be renderable: every readout in eval
+    # reads the target whose index is 15, and that index has to be the terminal.
+    if len(targets) <= STREAM25_CONTEXT_FRAMES[-1] or targets[STREAM25_CONTEXT_FRAMES[-1]] != context[-1]:
+        raise ValueError(f"context offset {offset} leaves the terminal frame unrenderable")
+    return context, targets
+
+
 def build_frame_eye_visibility(
     camera_names: Sequence[str],
     num_frames: int,

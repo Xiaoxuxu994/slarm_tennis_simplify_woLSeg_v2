@@ -41,6 +41,11 @@ ROWS = [
     ("--- position ---",           None,                               None,     True),
     ("pos15 balltoken",            "ball_pos15_error",                 "median", True),
     ("pos15 pixel-fit",            "ball_pos15_error_fit",             "median", True),
+    ("--- catch frame ---",        None,                               None,     True),
+    ("catch position med",         "catch_position",                   "median", True),
+    ("catch position p95",         "catch_position",                   "p95",    True),
+    ("catch position balltoken",   "catch_position_balltoken",         "median", True),
+    ("catch horizon s",            "catch_horizon_s",                  "median", True),
     ("--- diagnostics ---",        None,                               None,     True),
     ("pixel pos err constant",     "pixel_pos_error_constant_m",       "median", True),
     ("pixel pos err scatter",      "pixel_pos_error_scatter_m",        "median", True),
@@ -66,6 +71,7 @@ def main() -> int:
     args = ap.parse_args()
 
     loaded = []
+    offsets = []
     for name in args.reports:
         path = Path(name)
         if not path.is_file():
@@ -74,6 +80,7 @@ def main() -> int:
         with path.open() as handle:
             data = json.load(handle)
         loaded.append((label_for(path), data.get("metrics", {}), data.get("overall")))
+        offsets.append((label_for(path), int(data.get("context_offset", 0) or 0)))
     if not loaded:
         print("[FAIL] no readable reports")
         return 1
@@ -118,6 +125,16 @@ def main() -> int:
     print("=" * len(header))
     print("* marks the best cell in the row. A velocity that bottoms out early and")
     print("  then climbs is overfitting; one that keeps falling is not.")
+    # Reports from different observation windows are not interchangeable: a slid
+    # window moves the terminal frame, so frame24_* is extrapolated over a
+    # different horizon. Say so rather than let the columns look comparable.
+    if len(set(value for _, value in offsets)) > 1:
+        print("")
+        print("WARNING: these reports use different context offsets:")
+        for label, value in offsets:
+            print(f"  {label}: offset +{value}")
+        print("  Only the catch-frame rows are comparable across offsets.")
+        print("  frame24_*, pos15 and v15 are measured at different instants.")
     return 0
 
 

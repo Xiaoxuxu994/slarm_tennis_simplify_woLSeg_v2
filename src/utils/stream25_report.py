@@ -45,6 +45,13 @@ KEY_METRICS: List[Tuple[str, str, List[Tuple[str, str]], Optional[str]]] = [
     #   fit vel15 明显好 -> MS3 直接预测速度不是最优，换拟合读出，零训练。
     #   constant >> scatter -> 逐帧误差主要是恒定偏置，拟合能赢很多。
     #   constant ≈ scatter -> 误差主要是逐帧抖动，拟合只能小赢。
+    # 接球帧落点。★ 这是唯一跨 context offset 可比的数：frame24_* 的外推时长
+    # 随窗口滑动而变，catch_* 的目标固定在绝对时刻 catch_frame 上，所以
+    # "把观测窗口后移" 买到了多少必须看这两行。catch horizon 打印的是
+    # (catch_frame - 终端帧) 的秒数，滑窗后它会变短 —— 那正是收益的来源。
+    ("catch position med / p95",        "down", [("catch_position", "median"), ("catch_position", "p95")], None),
+    ("catch position balltoken",        "down", [("catch_position_balltoken", "median")], None),
+    ("catch horizon s",                 "down", [("catch_horizon_s", "median")], None),
     ("pixel fit frame24 med / p95",     "down", [("frame24_position_fit", "median"), ("frame24_position_fit", "p95")], None),
     ("pixel fit pos15 med / p95",       "down", [("ball_pos15_error_fit", "median"), ("ball_pos15_error_fit", "p95")], None),
     ("pixel fit vel15 med / p95",       "down", [("ball_vel15_error_fit", "median"), ("ball_vel15_error_fit", "p95")], None),

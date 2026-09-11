@@ -24,6 +24,7 @@ from .stream25 import (
     build_frame_eye_visibility,
     rig_ms3_to_canonical,
     select_static_samples,
+    shifted_contract,
 )
 
 logger = logging.getLogger("PerceptualModel")
@@ -876,9 +877,22 @@ class Stream25Dataset(PerceptualModelDataset):
     LSeg-driving ``semantic_labels``.
     """
 
-    def __init__(self, *args, training: bool = True, **kwargs):
+    def __init__(self, *args, training: bool = True, context_offset: int = 0, **kwargs):
         kwargs.setdefault("strict_data_loading", True)
         super().__init__(*args, **kwargs)
+        # Slide the whole observation window later in the clip. Validated here,
+        # at construction, so a bad offset fails before any scene is read.
+        self.context_offset = int(context_offset)
+        self._context_frames, self._shifted_targets = shifted_contract(self.context_offset)
+        # The training target scheduler still speaks the frozen frame numbers, so
+        # a shifted window would pair shifted context with unshifted targets and
+        # silently train on the wrong pairs. Eval takes the shifted target list
+        # wholesale and is unaffected, so refuse only the training path.
+        if self.context_offset and training:
+            raise ValueError(
+                "context_offset is an evaluation-only switch; the training "
+                "target scheduler has not been shifted with it"
+            )
         if self.num_context_timesteps != len(STREAM25_CONTEXT_FRAMES):
             pass
         if self.num_target_timesteps != 7:
@@ -992,12 +1006,14 @@ class Stream25Dataset(PerceptualModelDataset):
             scene_index = sample_key
             optimizer_step = None
         scene_json = self.annotations[scene_index]
-        source_frame_idx = STREAM25_CONTEXT_FRAMES[0]
+        context_frames = self._context_frames
+        # Times reach the trunk as dt from source_frame_idx, so anchoring it to
+        # the window's own first frame keeps them identical under any offset.
+        source_frame_idx = context_frames[0]
         time_in_seconds = scene_json["normalized_time"]
 
-        context_frames = STREAM25_CONTEXT_FRAMES
         if return_all or not self.training:
-            target_frames = STREAM25_ALL_TARGET_FRAMES
+            target_frames = self._shifted_targets
         elif optimizer_step is None:
             pass
         else:
