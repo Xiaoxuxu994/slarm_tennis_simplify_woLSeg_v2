@@ -431,3 +431,64 @@ def test_forward_reattaches_the_offset_to_the_outgoing_cache():
     )
     returns = [n for n in ast.walk(fn) if isinstance(n, ast.Return) and n.value is not None]
     assert returns, "the validator must hand the derived offset back to forward"
+
+
+# ---------------------------------------------------------------------------
+# 第四次同类 bug：假设"永远有 25 个 target"
+#
+#     IndexError: index 22 is out of bounds for dimension 0 with size 22
+#
+# 滑窗会从尾部吃掉 target（offset k 只剩 25-k 个），所以任何按 range(25) 遍历
+# 渲染结果的循环都会越界。前三次是写死的**帧号**，这次是写死的**数量** —— 同一
+# 个毛病的两种长相，所以下面两条都扫。
+# ---------------------------------------------------------------------------
+
+
+def test_no_loop_over_a_hardcoded_target_count():
+    """A slid window renders 25 - offset targets, never a literal 25."""
+    source = _EVAL_SRC.read_text()
+    offenders = [
+        line.strip()
+        for line in source.splitlines()
+        if "range(25)" in line and not line.strip().startswith("#")
+    ]
+    assert not offenders, f"loop assumes 25 targets: {offenders}"
+
+
+def test_the_target_count_is_checked_against_the_offset():
+    """Bounding by the tensor alone would hide a truncation from another cause."""
+    source = _EVAL_SRC.read_text()
+    assert "expected_targets" in source
+    assert "len(STREAM25_ALL_TARGET_FRAMES) - int(context_offset)" in source
+
+
+@pytest.mark.parametrize("offset,targets", [(0, 25), (3, 22), (6, 19), (9, 16)])
+def test_rendered_target_count_matches_the_shifted_contract(offset, targets):
+    """The count the evaluator asserts is the count the dataset actually yields."""
+    _, shifted = shifted_contract(offset)
+    assert len(shifted) == targets == len(_BASE_TARGETS) - offset
+
+
+@pytest.mark.parametrize("offset", [0, 3, 6, 9])
+def test_the_anchor_bucket_still_lands_on_the_context_frames(offset):
+    """TIME_BUCKETS index the target list, so anchor must stay the six observations."""
+    context, targets = shifted_contract(offset)
+    anchor_indices = [0, 3, 6, 9, 12, 15]
+    assert [targets[i] for i in anchor_indices] == list(context)
+
+
+@pytest.mark.parametrize("offset,empty", [(0, []), (3, ["farthest"]),
+                                          (9, ["near", "mid", "far", "farthest"])])
+def test_extrapolation_buckets_empty_out_as_the_window_slides(offset, empty):
+    """Not a bug: a slid window has no targets left past its terminal.
+
+    Those buckets carry acceptance gates, so `overall` goes FAIL-by-missing at
+    large offsets. catch_position is computed from the terminal render plus an
+    analytic extrapolation and does not depend on any bucket.
+    """
+    buckets = {"near": range(16, 18), "mid": range(18, 20),
+               "far": range(20, 22), "farthest": range(22, 25)}
+    _, targets = shifted_contract(offset)
+    gone = [name for name, idx in buckets.items()
+            if all(i >= len(targets) for i in idx)]
+    assert gone == empty

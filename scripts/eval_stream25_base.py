@@ -915,8 +915,19 @@ def compute_stream25_scene_metrics(
     if any(tensor.shape[1] != num_views for tensor in view_tensors):
         raise ValueError("Stream25 evaluator received inconsistent target view axes")
 
+    # 目标帧数随窗口滑动变短：offset k 只剩 25-k 个 target（契约的 range(25) 被
+    # 窗口从尾部吃掉）。这里必须按**实际到达的数量**遍历，写死 25 会在 offset>0 时
+    # 越界。数量仍然核对一遍，这样别的原因造成的静默截断照样会炸出来。
+    num_targets = int(gt_depth.shape[0])
+    expected_targets = len(STREAM25_ALL_TARGET_FRAMES) - int(context_offset)
+    if num_targets != expected_targets:
+        raise ValueError(
+            f"Stream25 evaluator received {num_targets} targets; a window at "
+            f"offset +{context_offset} must render {expected_targets}"
+        )
+
     records: List[Dict[str, Any]] = []
-    for frame in range(25):
+    for frame in range(num_targets):
         for eye in range(num_views):
             valid_depth = torch.isfinite(gt_depth[frame, eye]) & (gt_depth[frame, eye] > 0)
             ball = ball_mask[frame, eye]
