@@ -333,3 +333,93 @@ def test_the_offset_resets_between_scenes():
         if isinstance(node, ast.FunctionDef) and node.name == "__init__"
     )
     assert "self.clear()" in ast.unparse(init), "__init__ must go through clear()"
+
+
+# ---------------------------------------------------------------------------
+# SLARM._validate_ball_temporal_observation
+#
+# 存在的理由：这是滑窗撞上的**第二道**写死契约的校验（第一道在 StreamSession）。
+#     ValueError: Temporal ball history must match frames 0,3,6,9,12,15
+# 它比 StreamSession 那道更难修，因为模型跨调用只靠 cache 传状态，所以 offset
+# 必须随 cache 一起走 —— 不然第二次观测就不知道本场景滑了多少。
+#
+# 这里钉住的正是那条链路：offset 由第一次观测确定、存进 cache、后续从 cache 读。
+# 如果 forward 忘了把 offset 放回新 cache（每次调用子模块都返回全新的 dict），
+# 第二步就会退回 offset 0 并报错 —— test_offset_must_survive_the_cache_handoff
+# 就是为这个失败模式写的。
+# ---------------------------------------------------------------------------
+
+
+def _ball_temporal_validator():
+    torch = pytest.importorskip("torch")
+    from src.utils.frame_indices import normalize_frame_indices
+
+    source = (ROOT / "src" / "models" / "slarm.py").read_text()
+    tree = ast.parse(source)
+    fn = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_validate_ball_temporal_observation"
+    )
+    # 方法体里那句 `from src.utils.frame_indices import ...` 会自己执行，
+    # 这里只需要 torch 和 Tensor 在命名空间里。
+    namespace = {"torch": torch, "Tensor": torch.Tensor,
+                 "normalize_frame_indices": normalize_frame_indices}
+    exec(compile(ast.Module([fn], []), "<validate_ball>", "exec"), namespace)
+    return namespace["_validate_ball_temporal_observation"], torch
+
+
+def _stream_ball(validate, torch, frames, *, drop_offset=False):
+    """Six single-observation calls, threading the cache exactly as forward does."""
+    session = object()
+    cache = None
+    for step, frame in enumerate(frames):
+        data = {
+            "context_image": torch.zeros(1, 1, 3, 3, 4, 4),
+            "context_frame_idx": torch.tensor([[[frame]] * 3]),
+        }
+        offset = validate(session, data, cache, True, aggregator_cache=None)
+        cache = {"num_steps": step + 1}
+        if not drop_offset:
+            cache["context_frame_offset"] = offset
+    return cache
+
+
+@pytest.mark.parametrize("offset", [0, 3, 6, 9])
+def test_ball_temporal_validator_accepts_a_slid_window(offset):
+    validate, torch = _ball_temporal_validator()
+    cache = _stream_ball(validate, torch, [f + offset for f in (0, 3, 6, 9, 12, 15)])
+    assert cache["context_frame_offset"] == offset
+
+
+def test_offset_must_survive_the_cache_handoff():
+    """The sub-modules return a fresh cache dict, so forward has to re-attach it."""
+    validate, torch = _ball_temporal_validator()
+    with pytest.raises(ValueError):
+        _stream_ball(validate, torch, [9, 12, 15, 18, 21, 24], drop_offset=True)
+
+
+def test_ball_temporal_validator_still_catches_a_truncated_history():
+    validate, torch = _ball_temporal_validator()
+    with pytest.raises(ValueError):
+        _stream_ball(validate, torch, [3, 6, 12, 15, 18, 21])
+
+
+def test_ball_temporal_validator_still_catches_a_reordered_history():
+    validate, torch = _ball_temporal_validator()
+    with pytest.raises(ValueError):
+        _stream_ball(validate, torch, [3, 6, 9, 15, 12, 18])
+
+
+def test_forward_reattaches_the_offset_to_the_outgoing_cache():
+    """Static guard: the sub-module's fresh dict must be stamped every call."""
+    source = (ROOT / "src" / "models" / "slarm.py").read_text()
+    assert 'context_frame_offset"] = ball_window_offset' in source
+    tree = ast.parse(source)
+    fn = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_validate_ball_temporal_observation"
+    )
+    returns = [n for n in ast.walk(fn) if isinstance(n, ast.Return) and n.value is not None]
+    assert returns, "the validator must hand the derived offset back to forward"

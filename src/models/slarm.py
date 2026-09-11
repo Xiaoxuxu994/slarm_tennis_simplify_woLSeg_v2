@@ -1596,6 +1596,7 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
             result["ball_temporal_cache"] = velocity_cache
             result["ball_v15_base"] = states[:, -1, 3:].detach()
             result["ball_v15_residual"] = residual[:, -1]
+            # Both terms are physical rig-frame m/s. Loss normalization happens later.
             states = torch.cat((states[..., :3].detach(), states[..., 3:].detach() + residual), dim=-1)
         result["ball_pos15"] = states[:, -1, :3]
         result["ball_v15"] = states[:, -1, 3:]
@@ -1614,8 +1615,16 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
 
     def _validate_ball_temporal_observation(
         self, data_dict: dict, cache, streaming: bool, aggregator_cache=None,
-    ) -> None:
-        """Reject a truncated or mismatched history before expensive feature extraction."""
+    ) -> int:
+        """Reject a truncated or mismatched history before expensive feature extraction.
+
+        Returns the window offset in frames, which the caller stores in the outgoing
+        cache. Evaluation may slide the whole observation window later in the clip
+        (--context-offset), so the absolute frame numbers move while the window's
+        SHAPE -- six observations, stride 3, increasing -- does not. The first
+        observation of a scene fixes the offset; every later one is still checked
+        against the contract, so a truncated or reordered history still fails.
+        """
         from src.utils.frame_indices import normalize_frame_indices
 
         b, t, v = data_dict["context_image"].shape[:3]
@@ -1645,10 +1654,26 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
             data_dict.get("context_frame_idx"), batch_size=b, num_timesteps=t,
             num_views=v, name="context_frame_idx",
         )
-        expected = (torch.arange(start, start + t, device=frame_idx.device) * 3)
+        if cache is None:
+            # Start of a scene: this observation defines the window's offset. Held in
+            # the cache for the rest of the scene, so it cannot drift mid-stream.
+            offset = int(frame_idx.reshape(-1)[0].item())
+            if offset < 0:
+                raise ValueError(
+                    f"Temporal ball history starts before the contract: frame {offset}"
+                )
+        else:
+            offset = cache.get("context_frame_offset", 0)
+            if not isinstance(offset, int) or offset < 0:
+                raise ValueError("Temporal ball cache carries an invalid window offset")
+        expected = torch.arange(start, start + t, device=frame_idx.device) * 3 + offset
         if not torch.all(frame_idx == expected[None, :]):
-            raise ValueError("Temporal ball history must match frames 0,3,6,9,12,15; "
-                             "check cache handoff or reset")
+            raise ValueError(
+                f"Temporal ball history must match frames {expected.tolist()} "
+                f"(contract stride 3, window offset +{offset}); "
+                "check cache handoff or reset"
+            )
+        return offset
 
     def forward(self,
                 data_dict,
@@ -1664,8 +1689,9 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
             start = time.time()
         images = data_dict["context_image"]
         b, t, v, c, h, w = images.size()
+        ball_window_offset = 0
         if self.ball_temporal_refine or self.ball_velocity_residual:
-            self._validate_ball_temporal_observation(
+            ball_window_offset = self._validate_ball_temporal_observation(
                 data_dict, ball_temporal_cache, aggregator_kv_cache_list is not None,
                 aggregator_cache=aggregator_kv_cache_list,
             )
@@ -1868,6 +1894,11 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
                             data_dict["context_time"], cache=ball_temporal_cache,
                             **velocity_kwargs,
                         )
+                        # The next observation validates against this, so the window
+                        # offset has to ride along with the rest of the stream state.
+                        _cache_out = ball_readout_outputs.get("ball_temporal_cache")
+                        if isinstance(_cache_out, dict):
+                            _cache_out["context_frame_offset"] = ball_window_offset
                         ball_pos15 = ball_readout_outputs["ball_pos15"]
                         ball_v15 = ball_readout_outputs["ball_v15"]
                         ball_latents = ball_readout_outputs["ball_latents"]
