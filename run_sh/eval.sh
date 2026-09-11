@@ -5,7 +5,7 @@ set -euo pipefail
 # 切换实验 / 权重时不会互相覆盖。
 
 GPUS="0"
-CONFIG="configs/slarm_stream25_24cm_triview_window6.yaml"
+CONFIG="configs/exp0910_004_balltoken_temporal_joint.yml"
 
 # CKPTS 可以是多个路径，也可以写通配符 —— 会按名字排序后逐个评测，
 # 每个 ckpt 有自己的输出目录（互不覆盖），最后自动打印一张跨 ckpt 的对照表。
@@ -17,8 +17,15 @@ CONFIG="configs/slarm_stream25_24cm_triview_window6.yaml"
 # 例：扫一整个实验的全部 ckpt
 #   CKPTS=("work_dirs/slarm/exp0910_004_balltoken_temporal_joint/checkpoints/ckpt_*.pth")
 CKPTS=(
-    "ckpts/ckpt_034999.pth"
+    "work_dirs/slarm/exp0910_004_balltoken_temporal_joint/checkpoints/ckpt_003999.pth"
 )
+
+# 观测窗口的偏移量，跑几个就写几个。每个 offset 有独立的输出目录，不会互相覆盖。
+#   0 = 冻结契约 context (0,3,6,9,12,15)，与所有历史数字逐字节可比
+#   9 = context (9,12,15,18,21,24)，终端帧 24
+# ★ 跨 offset 只能比 catch position —— 见文件下方那段说明。
+# 扫一轮窗口：OFFSETS=(0 3 6 9)
+OFFSETS=(0)
 
 # 已有 evaluation.json 时跳过（重跑扫描时省时间）。改成 0 则强制重算。
 SKIP_EXISTING=0
@@ -128,37 +135,54 @@ echo ""
 #   pos15/v15 测的是不同时刻 —— compare_evaluations.py 会在 offset 不一致时警告。
 #   offset 0 逐字节等于冻结契约，所有历史数字仍然可比。
 #
-# 例（同一个 ckpt 扫窗口，这是判断"看得更晚值多少"的完整实验）：
-#   for k in 0 3 6 9; do
-#       bash run_sh/eval.sh --context-offset $k
-#   done
-#   注意：输出目录只按 config+ckpt 命名，扫 offset 时会互相覆盖 ——
-#   先把上一轮的 evaluation.json 挪走，或者逐个改 CONFIG_NAME。
+# 怎么跑：把上面的 OFFSETS 改成 (0 3 6 9)，然后 bash run_sh/eval.sh。
+# 每个 offset 写进自己的目录（offset 0 保持原目录名），结尾自动出对照表。
+
+# offset 由 OFFSETS 数组管，不要再从命令行传 —— argparse 会静默取最后一个，
+# 于是每个输出目录的名字和它里面的数据就对不上了。
+for arg in "$@"; do
+    case "${arg}" in
+        --context-offset*|--context_offset*)
+            echo "[FAIL] pass offsets through the OFFSETS array, not the command line"
+            echo "       (the output directory is named from it; a flag here would lie)"
+            exit 1
+            ;;
+    esac
+done
+[ ${#OFFSETS[@]} -gt 0 ] || { echo "[FAIL] OFFSETS is empty"; exit 1; }
 
 REPORTS=()
 for CKPT in "${EXPANDED[@]}"; do
+  for OFF in "${OFFSETS[@]}"; do
     TAG="$(basename "${CKPT}" .pth)"
-    OUT_DIR="work_dirs/slarm/stream25_eval/${CONFIG_NAME}/${TAG}"
+    # offset 0 的目录名保持原样，历史结果原地可比、不会被重命名冲散。
+    if [ "${OFF}" = "0" ]; then
+        OUT_DIR="work_dirs/slarm/stream25_eval/${CONFIG_NAME}/${TAG}"
+    else
+        OUT_DIR="work_dirs/slarm/stream25_eval/${CONFIG_NAME}/${TAG}_off${OFF}"
+    fi
     mkdir -p "${OUT_DIR}"
     REPORTS+=( "${OUT_DIR}/evaluation.json" )
 
     if [ "${SKIP_EXISTING}" = "1" ] && [ -f "${OUT_DIR}/evaluation.json" ]; then
-        echo "[keep] ${TAG} -> ${OUT_DIR}/evaluation.json"
+        echo "[keep] ${TAG} off${OFF} -> ${OUT_DIR}/evaluation.json"
         continue
     fi
 
     echo "=========================================================="
-    echo "eval   : ${TAG}"
+    echo "eval   : ${TAG}   context offset +${OFF}"
     echo "out    : ${OUT_DIR}"
     echo "=========================================================="
     bash run_sh/eval_stream25_base.sh \
         --config "${CONFIG}" \
         --checkpoint "${CKPT}" \
         --split validation \
+        --context-offset "${OFF}" \
         --output "${OUT_DIR}/evaluation.json" \
         --output-markdown "${OUT_DIR}/evaluation.md" \
         "$@"
     echo ""
+  done
 done
 
 echo ""
