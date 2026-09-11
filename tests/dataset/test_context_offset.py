@@ -193,7 +193,15 @@ def test_eval_source_compiles_not_just_parses():
 def test_no_bare_frame_fifteen_or_twentyfour_gt_lookups_remain():
     """GT is indexed by ABSOLUTE frame, so a literal 15/24 ignores the offset."""
     source = _EVAL_SRC.read_text()
+    # ★ 这个列表漏过一次。第一版只写了局部变量的写法（gt_v15[0, 15]），
+    #   于是调用点上的 data_dict["ball_velocity_rig"][0, 15] 活了下来。
+    #   所以下面用正则扫「任何 *_rig 张量被字面量 15/24 索引」，而不是逐个列举写法。
+    import re
+    leaked = re.findall(r'(?:ball_(?:position|velocity)_rig"?\]?|gt_pos15|gt_v15|gt_v|gt_positions)'
+                        r'\[0?,?\s*(?:15|24)\]', source)
+    assert not leaked, f"offset-blind GT lookups still present: {sorted(set(leaked))}"
     for bad in ('ball_position_rig"][0, 24]',
+                'ball_velocity_rig"][0, 15]',
                 'gt_pos15[0, 15]',
                 'gt_v15[0, 15]',
                 'gt_v[0, 15]',

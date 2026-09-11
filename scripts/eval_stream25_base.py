@@ -1029,8 +1029,13 @@ def compute_stream25_scene_metrics(
         data_dict["target_time"],
         gt_pos24,
         None if _gt_positions is None else _gt_positions[0].float().cpu(),
+        # Terminal GT velocity. ball_velocity_rig is indexed by ABSOLUTE frame,
+        # so a literal 15 would score the slid window's terminal state against
+        # the wrong instant -- quietly, with a plausible-looking number.
         None if data_dict.get("ball_velocity_rig") is None
-        else data_dict["ball_velocity_rig"][0, 15].float().cpu(),
+        else data_dict["ball_velocity_rig"][
+            0, STREAM25_CONTEXT_FRAMES[-1] + int(context_offset)
+        ].float().cpu(),
         dt=dt, timespan=timespan,
         ball_surface_offset=ball_surface_offset,
         fit_frames=balltoken_fit_frames,
@@ -1432,6 +1437,14 @@ def run_evaluation(
             )
             scene_result["scene_index"] = index
             scene_result["scene_name"] = input_dict.get("scene_name", [str(index)])[0]
+            if "velocity_residual" in scene_result:
+                from src.utils.ball_residual_diagnostics import velocity_unit_diagnostics
+                from src.utils.stream25_losses import ball_vel_scale_from_timespan
+                velocity_scale = float(getattr(args, "stream25_ball_vel_scale", None)
+                                       or ball_vel_scale_from_timespan(args.timespan))
+                diagnostic = scene_result["velocity_residual"]
+                diagnostic.update(velocity_unit_diagnostics(diagnostic, velocity_scale))
+                diagnostic["velocity_loss_scale_mps"] = velocity_scale
             scene_results.append(_compact_scene_result(scene_result))
             print(
                 f"Evaluated Stream25 {split} scene {index + 1}/{len(dataset)}",
