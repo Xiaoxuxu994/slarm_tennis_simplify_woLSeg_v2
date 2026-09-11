@@ -47,8 +47,18 @@ from .temporal_ownership import (
     ms3_displacement,
     ms3_velocity,
 )
-from tools.export_ply import save_ply
+from tools.export_ply import save_ply, RGB2SH
 from src.dataset.constants import SEMANTIC_LABEL_LIST, SEMANTIC_ID_TO_COLOR
+
+#: 四类 task semantic 在导出 ply 时的配色（RGB，0..1）。类别 1 是球 —— 评测里
+#: 的球掩码就是 `semantic == 1`（eval_stream25_base.py:562），所以给它一个
+#: 在灰色房间里绝对跳出来的颜色，肉眼找球不用调图层。
+TASK_SEMANTIC_PLY_COLORS = (
+    (0.25, 0.25, 0.28),   # 0 背景
+    (1.00, 0.00, 0.80),   # 1 球
+    (0.00, 0.75, 0.75),   # 2
+    (1.00, 0.65, 0.00),   # 3
+)
 
 
 _RESNET_MEAN = [0.485, 0.456, 0.406]
@@ -2232,10 +2242,19 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
                               opacity_threshold=0.1, save_path='output_gs'):
         input_image = data_dict['context_image']
         # first_idx = data_dict['context_frame_idx'][0].to(torch.int16).tolist()[0]
-        target_frame_idxs = data_dict['target_frame_idx'][0].to(torch.int16).tolist()
         b, t, v, c, h, w = input_image.shape
         assert b == 1
         _, tgt_t, _, _ = render_results['gs_means'].shape  # [(b tgt_t), (t v h w), c]
+        # ★ target_frame_idx 是 [b, tgt_t * v]（每个帧号按相机重复 v 次），不是
+        #   [b, tgt_t]。以前直接用 t_idx 去索引它，文件名就变成了 t_idx // v：
+        #   只产出 ceil(tgt_t/v) 个不同的名字，每个还被三个**不同**目标帧先后
+        #   覆盖，活下来的是最后一个。文件名和内容对不上，而且不报错。
+        #   normalize_frame_indices 正是为这个布局写的，顺带校验各视角同步。
+        from src.utils.frame_indices import normalize_frame_indices
+        target_frame_idxs = normalize_frame_indices(
+            data_dict['target_frame_idx'], batch_size=b, num_timesteps=tgt_t,
+            num_views=v, name='target_frame_idx',
+        )[0].tolist()
 
         for t_idx in range(tgt_t):
             xyz = render_results['gs_means'][:, t_idx]
@@ -2290,6 +2309,31 @@ class SLARM(nn.Module, PyTorchModelHubMixin):
             color = color[mask]
             gaussians_ply_format[:, :, 3:6] = color
             save_ply(gaussians_ply_format, os.path.join(save_path, f'gs_rgb_{target_frame_idxs[t_idx]}.ply'))
+
+            # gs: task semantic。原来的语义导出藏在下面的 `if self.with_feat:` 里，
+            # 而 woLSeg 变体把 with_feat 硬编码成 False 且立刻 raise，所以那条路
+            # 从来没执行过。这条走的是**活着的**四类 task semantic 头的输入标注。
+            #
+            # 不需要重采样：高斯是逐 context 像素的，展平顺序就是 (t v h w)，
+            # 和 context_task_semantic 的布局逐元素对齐，每个高斯直接取自己那个
+            # 源像素的类别。
+            #
+            # save_ply 把 color 当成 SH 直流项（写出时做 SH2RGB），所以这里先
+            # RGB2SH 反变换一次，导出的颜色才正是调色板里的那个颜色。
+            task_semantic = data_dict.get('context_task_semantic')
+            if task_semantic is not None:
+                if tuple(task_semantic.shape) != (b, t, v, h, w):
+                    raise ValueError(
+                        f"context_task_semantic is {tuple(task_semantic.shape)}; the "
+                        f"Gaussians are one per context pixel, so it must be {(b, t, v, h, w)}"
+                    )
+                labels = rearrange(task_semantic, 'b t v h w -> b (t v h w)')[0][mask[0]]
+                palette = torch.tensor(TASK_SEMANTIC_PLY_COLORS, dtype=torch.float32)
+                palette = RGB2SH(palette).to(gaussians_ply_format.device)
+                labels = labels.long().clamp_(0, palette.shape[0] - 1).cpu()
+                gaussians_ply_format[:, :, 3:6] = palette[labels]
+                save_ply(gaussians_ply_format,
+                         os.path.join(save_path, f'gs_semantic_{target_frame_idxs[t_idx]}.ply'))
 
             if self.with_feat:
                 # LSeg feat path removed (woLSeg variant); with_feat is always False.
