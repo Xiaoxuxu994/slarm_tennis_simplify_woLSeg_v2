@@ -42,6 +42,10 @@ DATASETS = {
     "ball_catch_triview_0903_2k": {"opencv2dataset": opencv2waymo, "canonical_to_flu": np.eye(4)},
     # Assumes the 0903 rig convention; verify the new annotations before training.
     "ball_catch_triview_0908_10k": {"opencv2dataset": opencv2waymo, "canonical_to_flu": np.eye(4)},
+    # 真机 L515 测试集（2 条，scene_40000/40001）：只用于 render / 零样本评测，不参与训练。
+    # 相机 OpenCV 约定，与仿真批次同一套轴序。外参俯仰已按 0924 修正（抬头 37.5°），
+    # 但 left/right 仍是设计朝向，双目几何未经标定板验证。
+    "ball_catch_real_l515_0923": {"opencv2dataset": opencv2waymo, "canonical_to_flu": np.eye(4)},
 }
 
 waymo_train = "scene_list/waymo_train.txt"  # NOTE: Use full data for multi-GPU
@@ -337,6 +341,23 @@ DATASET_DICT = {
         "num_target_timesteps": 7,
         "annotation_txt_file_train": "scene_list/ball_catch_triview_0908_10k_train.txt",
         "annotation_txt_file_val": "scene_list/ball_catch_triview_0908_10k_validation.txt",
+        "camera_list": {
+            2: ["front_left", "front_right"],
+            3: ["front_left", "front_right", "lower_front"],
+        },
+        "ref_camera": "front_left",
+    },
+
+    # 真机 L515 测试集：real_camera_data_l515_hsv_test_0923_5 转出的 2 个场景。
+    # 相机映射 opst_cam(left)->front_left, side_cam(right)->front_right,
+    # wrist_cam(upper，实为固定相机)->lower_front。没有训练划分，train/val 指向同一份清单。
+    "ball_catch_real_l515_0923": {
+        "size": [320, 240],
+        "temporal": True,
+        "num_context_timesteps": 6,
+        "num_target_timesteps": 7,
+        "annotation_txt_file_train": "scene_list/ball_catch_real_l515_0923_test.txt",
+        "annotation_txt_file_val": "scene_list/ball_catch_real_l515_0923_test.txt",
         "camera_list": {
             2: ["front_left", "front_right"],
             3: ["front_left", "front_right", "lower_front"],
