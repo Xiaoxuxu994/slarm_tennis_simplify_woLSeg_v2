@@ -148,6 +148,7 @@ class PerceptualModelDataset(Dataset):
         only_interp: bool = True,
         strict_data_loading: bool = False,
         context_stride: int = 1,
+        allow_missing_gt: bool = False,
     ):
         super().__init__()
         self.data_root = data_root
@@ -173,6 +174,12 @@ class PerceptualModelDataset(Dataset):
         self.online_feat = online_feat
         self.strict_data_loading = strict_data_loading
         self.context_stride = context_stride
+        # Real captures carry RGB only. With this on, a missing depth map,
+        # semantic map, visibility contract or ball trajectory reads as empty
+        # (zero depth = invalid, all-background semantic, ball not visible)
+        # instead of failing the load. Off by default: for simulator data a
+        # missing file is a broken export and must stay loud.
+        self.allow_missing_gt = allow_missing_gt
         # if online_feat:
         #     assert all(s in ONLINE_FEAT_TYPES for s in self.load_feat_types), \
         #         f"The feat types {self.load_feat_types} should be in {ONLINE_FEAT_TYPES}. "
@@ -555,9 +562,17 @@ class PerceptualModelDataset(Dataset):
                 if dataset_name.startswith("ball_catch"):
                     if self.load_depth:
                         depth_path = img_path.replace("vis/color", "vis/depth").replace(".jpg", ".tif")
-                        depth = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
+                        # An image path without vis/color maps onto itself, and
+                        # reading the RGB file back as depth would be wrong
+                        # rather than missing.
+                        depth = (cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
+                                 if depth_path != img_path
+                                 and not (self.allow_missing_gt and not os.path.isfile(depth_path))
+                                 else None)
                         if depth is None and self.strict_data_loading:
                             pass
+                        if self.allow_missing_gt and (depth is None or depth.ndim != 2):
+                            depth = np.zeros(self.target_size, dtype=np.float32)
                         depth = torch.tensor(depth).float()
                         depth = resize_depth(depth, self.target_size)
                         depths.append(depth)
@@ -927,17 +942,27 @@ class Stream25Dataset(PerceptualModelDataset):
                     camera: visible_frames_by_camera[camera]
                     for camera in camera_contract
                 }
-            visibility = build_frame_eye_visibility(
-                camera_contract,
-                scene_json["num_timesteps"],
-                visible_mask_by_camera=visible_mask_by_camera,
-                visible_frames_by_camera=visible_frames_by_camera,
-            )
-            self._preflight_stream25_semantic_visibility(
-                scene_json,
-                camera_contract,
-                visibility,
-            )
+            if (
+                self.allow_missing_gt
+                and visible_mask_by_camera is None
+                and visible_frames_by_camera is None
+            ):
+                visibility = torch.zeros(
+                    scene_json["num_timesteps"], len(camera_contract), dtype=torch.bool
+                )
+            else:
+                visibility = build_frame_eye_visibility(
+                    camera_contract,
+                    scene_json["num_timesteps"],
+                    visible_mask_by_camera=visible_mask_by_camera,
+                    visible_frames_by_camera=visible_frames_by_camera,
+                )
+            if not (self.allow_missing_gt and not self._has_semantic_paths(scene_json, camera_contract)):
+                self._preflight_stream25_semantic_visibility(
+                    scene_json,
+                    camera_contract,
+                    visibility,
+                )
             timestamps = scene_json.get("normalized_time")
             terminal_frame = STREAM25_ALL_TARGET_FRAMES[-1]
             if (
@@ -962,6 +987,15 @@ class Stream25Dataset(PerceptualModelDataset):
             self._ball_visibility_by_scene.append(visibility)
         self.training = training
         self._scheduler = Stream25TargetScheduler()
+
+    @staticmethod
+    def _has_semantic_paths(scene_json: Dict[str, Any], camera_list: List[str]) -> bool:
+        paths = scene_json.get("task_semantic_path")
+        return isinstance(paths, dict) and all(
+            isinstance(paths.get(camera), list)
+            and len(paths[camera]) == scene_json["num_timesteps"]
+            for camera in camera_list
+        )
 
     def _preflight_stream25_semantic_visibility(
         self,
@@ -1073,14 +1107,20 @@ class Stream25Dataset(PerceptualModelDataset):
 
         task_semantics = []
         ball_masks = []
+        has_semantic = self._has_semantic_paths(scene_json, camera_list)
         for camera in camera_list:
-            semantic_relative_path = scene_json["task_semantic_path"][camera][frame_idx]
-            sem_path = os.path.join(
-                self.data_root, "datasets", dataset_name, semantic_relative_path
-            )
-            raw_semantic = cv2.imread(sem_path, cv2.IMREAD_UNCHANGED)
+            if self.allow_missing_gt and not has_semantic:
+                raw_semantic = None
+            else:
+                semantic_relative_path = scene_json["task_semantic_path"][camera][frame_idx]
+                sem_path = os.path.join(
+                    self.data_root, "datasets", dataset_name, semantic_relative_path
+                )
+                raw_semantic = cv2.imread(sem_path, cv2.IMREAD_UNCHANGED)
             if raw_semantic is None:
                 pass
+            if self.allow_missing_gt and raw_semantic is None:
+                raw_semantic = np.zeros(self.target_size, dtype=np.uint8)
             raw_semantic = cv2.resize(
                 raw_semantic,
                 self.target_size[::-1],
@@ -1104,7 +1144,16 @@ class Stream25Dataset(PerceptualModelDataset):
         frame["ball_visible"] = actual_visibility
         frame["ball_region_eligible"] = actual_visibility.clone()
 
-        traj_frame = scene_json["ball_trajectory"]["frames"][frame_idx]
+        trajectory = scene_json.get("ball_trajectory")
+        if self.allow_missing_gt and trajectory is None:
+            # No recorded ball: zero state in a rig that coincides with the
+            # world, so the canonical/rig bridge below stays well defined.
+            trajectory = {
+                "frames": [{"position_rig": [0.0, 0.0, 0.0], "velocity_rig": [0.0, 0.0, 0.0]}]
+                * scene_json["num_timesteps"],
+                "rig_to_world": np.eye(4).tolist(),
+            }
+        traj_frame = trajectory["frames"][frame_idx]
         frame["position_rig"] = torch.tensor(
             traj_frame["position_rig"], dtype=torch.float32
         )  # (3,)
@@ -1116,9 +1165,7 @@ class Stream25Dataset(PerceptualModelDataset):
         # the trajectory/MS3 contract uses the stereo-rig frame. Preserve the
         # rigid bridge so position integration never mixes those coordinates.
         ref_camera = DATASET_DICT[dataset_name]["ref_camera"]
-        rig_to_world = np.asarray(
-            scene_json["ball_trajectory"]["rig_to_world"], dtype=np.float64
-        )
+        rig_to_world = np.asarray(trajectory["rig_to_world"], dtype=np.float64)
         ref_camera_to_world = np.asarray(
             scene_json["camera_to_world"][ref_camera][source_frame_idx],
             dtype=np.float64,

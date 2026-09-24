@@ -305,6 +305,10 @@ def main():
                     choices=("log", "linear"), default="log",
                     help="log (default) spreads the near field where the ball is; "
                          "linear keeps absolute spacing")
+    p2.add_argument("--allow-missing-gt", "--allow_missing_gt", dest="allow_missing_gt",
+                    action="store_true",
+                    help="load scenes that have no GT depth / semantic / ball trajectory "
+                         "(real captures); the GT depth and semantic panels render empty")
     extra, remaining = p2.parse_known_args()
 
     from main_slarm import get_args_parser
@@ -347,7 +351,16 @@ def main():
         strict_data_loading=True,
         context_stride=args.context_stride,
         training=False,
+        allow_missing_gt=extra.allow_missing_gt,
     )
+    print(f"manifest: {val_annotation} ({len(dataset)} scenes)", flush=True)
+    out_of_range = [sid for sid in scene_ids if not 0 <= sid < len(dataset)]
+    if out_of_range:
+        raise SystemExit(
+            f"--scene_ids {out_of_range} out of range: {val_annotation} lists "
+            f"{len(dataset)} scenes (ids are 0-based positions in that list)")
+    if extra.allow_missing_gt:
+        print("allow-missing-gt: absent GT depth/semantic render as empty panels", flush=True)
 
     dtype = torch.bfloat16
 

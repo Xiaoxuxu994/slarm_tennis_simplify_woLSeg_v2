@@ -4,11 +4,11 @@
 # Model keys are copied from exp0915_001 unchanged -- the checkpoint only loads
 # into the architecture it was trained with.
 #
-# Manifest lives in the data root (slarm_data_real/scene_list/), like every
+# Manifest lives in the data root (data/slarm_data_real/scene_list/), like every
 # other dataset; run_sh/render_real_l515.sh writes it if it is missing.
 model: slarm
 dataset: [ball_catch_real_l515_0923]
-data_root: slarm_data_real
+data_root: data/slarm_data_real
 input_size: [320, 240]
 patch_size: 8
 embed_dim: 768
